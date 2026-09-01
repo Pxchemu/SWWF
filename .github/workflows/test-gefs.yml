@@ -1,0 +1,21 @@
+name: Test GEFS
+
+# "workflow_dispatch" oznacza: uruchamiane RĘCZNIE, klikając przycisk na GitHubie
+# (nie automatycznie w tle) — to dobrze na start, żeby samemu odpalić test kiedy chcemy.
+on:
+  workflow_dispatch:
+
+jobs:
+  test-gefs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install herbie-data
+
+      - name: Uruchom test
+        run: python test_gefs.py
