@@ -10,11 +10,17 @@ aż trafimy na taki, który już jest), liczy prawdopodobieństwo:
     zależnym od temperatury (zimniej = bardziej puchaty, mniej wody na cm)
 
 dla siatki punktów nad Europą Środkową (Niemcy, Polska, Czechy, Słowacja —
-siatka 0.25°), zapisuje jako swwf.json.
+siatka 0.5°), zapisuje jako swwf.json.
 
 UWAGA: przelicznik opad->śnieg (funkcja snow_ratio) to celowo uproszczona
 tabela robocza — do skalibrowania danymi z weryfikacji (patrz plan projektu,
 sekcja 4 i 8).
+
+UWAGA 2: próbowaliśmy gęstszej siatki 0.25° (product="atmos.25"), ale ten
+produkt nie jest w pełni dostępny na AWS dla wszystkich członków — Herbie
+po cichu próbuje wtedy zapasowo NOMADS, co bywa zawodne (dokładnie problem
+niezawodności, którego dokument planu chciał uniknąć wybierając AWS). Stąd
+z powrotem 0.5°, w pełni oparte na AWS.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -66,7 +72,7 @@ def find_latest_run():
     for i in range(8):  # sprawdź do 48h wstecz
         test_time = candidate - timedelta(hours=6 * i)
         try:
-            H = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+            H = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
                        member=1, fxx=6, verbose=False)
             if H.grib is not None:
                 return test_time
@@ -146,13 +152,13 @@ def main():
                 fxx = end
 
                 # --- opad w tym oknie (jak dotychczas) ---
-                H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
                              member=m, fxx=fxx, verbose=False)
                 ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
                 precip_window = crop_to_region(ds_p["tp"])
 
                 # --- temperatura na koniec tego okna (NOWOŚĆ) ---
-                H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
                              member=m, fxx=fxx, verbose=False)
                 ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
                 t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15  # Kelwiny -> stopnie C
