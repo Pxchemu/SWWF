@@ -3,24 +3,27 @@ SWWF — generowanie swwf.json.
 
 Znajduje najnowszy DOSTĘPNY przebieg GEFS (nie zawsze najnowszy w ogóle —
 dane pojawiają się na AWS z opóźnieniem, więc sprawdzamy kolejne wstecz,
-aż trafimy na taki, który już jest), liczy prawdopodobieństwo:
+aż trafimy na taki, który już jest — i to na DWÓCH członkach naraz, nie
+tylko pierwszym, bo synchronizacja na AWS bywa rozłożona w czasie), liczy
+prawdopodobieństwo:
   - opadu (mm wody) — jak dotychczas
-  - ŚNIEGU (cm) — NOWOŚĆ: dla każdego okna 6h sprawdzamy T2m; jeśli jest
-    wystarczająco zimno, opad z tego okna liczymy jako śnieg, z przelicznikiem
-    zależnym od temperatury (zimniej = bardziej puchaty, mniej wody na cm)
+  - ŚNIEGU (cm) — dla każdego okna 6h sprawdzamy T2m; jeśli jest wystarczająco
+    zimno, opad z tego okna liczymy jako śnieg, z przelicznikiem zależnym
+    od temperatury (zimniej = bardziej puchaty, mniej wody na cm)
 
 dla siatki punktów nad Europą Środkową (Niemcy, Polska, Czechy, Słowacja —
-siatka 0.5°), zapisuje jako swwf.json.
+siatka 0.25°), zapisuje jako swwf.json.
 
 UWAGA: przelicznik opad->śnieg (funkcja snow_ratio) to celowo uproszczona
 tabela robocza — do skalibrowania danymi z weryfikacji (patrz plan projektu,
 sekcja 4 i 8).
 
-UWAGA 2: próbowaliśmy gęstszej siatki 0.25° (product="atmos.25"), ale ten
-produkt nie jest w pełni dostępny na AWS dla wszystkich członków — Herbie
-po cichu próbuje wtedy zapasowo NOMADS, co bywa zawodne (dokładnie problem
-niezawodności, którego dokument planu chciał uniknąć wybierając AWS). Stąd
-z powrotem 0.5°, w pełni oparte na AWS.
+UWAGA 2: produkt 0.25° (atmos.25) JEST w pełni dostępny na AWS dla wszystkich
+30 członków (zweryfikowane bezpośrednim testem, priority=["aws"]) — wcześniejsza
+nieudana próba wynikała z tego, że sprawdzaliśmy gotowość przebiegu tylko na
+członku 1, a synchronizacja pozostałych członków na AWS bywa opóźniona
+względem niego. Stąd sprawdzanie na dwóch członkach (1 i 30) w find_latest_run(),
+oraz priority=["aws"] wszędzie, żeby nigdy po cichu nie spadać na NOMADS.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -65,16 +68,20 @@ def snow_ratio(t2m_c):
 def find_latest_run():
     """Szuka najnowszego przebiegu GEFS, który faktycznie już jest dostępny na AWS —
     próbuje kolejno wstecz (00/06/12/18Z), bo świeżo wystartowany przebieg
-    bywa widoczny na AWS dopiero po kilku godzinach."""
+    bywa widoczny na AWS dopiero po kilku godzinach. Sprawdzamy GOTOWOŚĆ na dwóch
+    członkach (1 i 30, nie tylko pierwszym) — synchronizacja na AWS bywa rozłożona
+    w czasie między członkami, więc sam pierwszy potrafi być gotowy wcześniej niż reszta."""
     now = datetime.now(timezone.utc)
     candidate = now.replace(minute=0, second=0, microsecond=0)
     candidate -= timedelta(hours=candidate.hour % 6)
     for i in range(8):  # sprawdź do 48h wstecz
         test_time = candidate - timedelta(hours=6 * i)
         try:
-            H = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
-                       member=1, fxx=6, verbose=False)
-            if H.grib is not None:
+            H1 = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                        member=1, fxx=6, priority=["aws"], verbose=False)
+            H30 = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                         member=30, fxx=6, priority=["aws"], verbose=False)
+            if H1.grib is not None and H30.grib is not None:
                 return test_time
         except Exception:
             continue
@@ -152,14 +159,14 @@ def main():
                 fxx = end
 
                 # --- opad w tym oknie (jak dotychczas) ---
-                H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
-                             member=m, fxx=fxx, verbose=False)
+                H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                             member=m, fxx=fxx, priority=["aws"], verbose=False)
                 ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
                 precip_window = crop_to_region(ds_p["tp"])
 
                 # --- temperatura na koniec tego okna (NOWOŚĆ) ---
-                H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
-                             member=m, fxx=fxx, verbose=False)
+                H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                             member=m, fxx=fxx, priority=["aws"], verbose=False)
                 ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
                 t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15  # Kelwiny -> stopnie C
 
