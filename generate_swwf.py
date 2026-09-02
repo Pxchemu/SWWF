@@ -3,12 +3,18 @@ SWWF — generowanie swwf.json.
 
 Znajduje najnowszy DOSTĘPNY przebieg GEFS (nie zawsze najnowszy w ogóle —
 dane pojawiają się na AWS z opóźnieniem, więc sprawdzamy kolejne wstecz,
-aż trafimy na taki, który już jest), liczy prawdopodobieństwo opadu
->= różnych progów dla siatki punktów nad Europą Środkową (Niemcy, Polska,
-Czechy, Słowacja — siatka 0.25°), zapisuje jako swwf.json.
+aż trafimy na taki, który już jest), liczy prawdopodobieństwo:
+  - opadu (mm wody) — jak dotychczas
+  - ŚNIEGU (cm) — NOWOŚĆ: dla każdego okna 6h sprawdzamy T2m; jeśli jest
+    wystarczająco zimno, opad z tego okna liczymy jako śnieg, z przelicznikiem
+    zależnym od temperatury (zimniej = bardziej puchaty, mniej wody na cm)
 
-UWAGA: na razie tylko opad (mm wody), NIE przeliczenie na śnieg (cm) —
-to świadomie odłożone na później (patrz plan projektu, sekcja 4).
+dla siatki punktów nad Europą Środkową (Niemcy, Polska, Czechy, Słowacja —
+siatka 0.25°), zapisuje jako swwf.json.
+
+UWAGA: przelicznik opad->śnieg (funkcja snow_ratio) to celowo uproszczona
+tabela robocza — do skalibrowania danymi z weryfikacji (patrz plan projektu,
+sekcja 4 i 8).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -27,12 +33,27 @@ LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
 MEMBERS = list(range(1, 31))
-THRESHOLDS_MM = [1, 5, 10, 20]
+THRESHOLDS_MM = [1, 5, 10, 20]      # progi dla samego opadu (mm wody)
+SNOW_THRESHOLDS_CM = [5, 10, 20]    # progi dla śniegu (cm) — zgodnie z dokumentem planu
+
+# próg temperatury, powyżej którego opad w danym oknie liczymy jako deszcz, nie śnieg
+# (lekko powyżej 0°C, bo mokry termometr chłodzi spadające krople/płatki)
+SNOW_TEMP_THRESHOLD_C = 1.0
 
 # poziomy zagrożenia z dokumentu planu (sekcja 3) — progi robocze, do skalibrowania później
 LEVEL_BOUNDS = [0, 20, 40, 60, 80, 100]
 LEVEL_COLORS = ['#ffffff', '#fde047', '#fb923c', '#ef4444', '#a855f7']
 LEVEL_NAMES = ['NONE', 'SLIGHT', 'ENHANCED', 'MODERATE', 'HIGH']
+
+
+def snow_ratio(t2m_c):
+    """Bardzo uproszczony przelicznik opad wody -> grubość śniegu (snow:liquid ratio),
+    zależny od temperatury. Klasyczne 10:1 w okolicach 0°C, więcej gdy mroźniej
+    (suchszy, bardziej puchaty śnieg), mniej gdy blisko granicy topnienia.
+    Do skalibrowania w przyszłości."""
+    return xr.where(t2m_c <= -10, 15.0,
+           xr.where(t2m_c <= -5, 12.0,
+           xr.where(t2m_c <= 0, 10.0, 7.0)))
 
 
 def find_latest_run():
@@ -54,7 +75,7 @@ def find_latest_run():
     raise RuntimeError("Nie znaleziono żadnego dostępnego przebiegu GEFS w ostatnich 48h")
 
 
-def crop_to_poland(da):
+def crop_to_region(da):
     lat = da.latitude
     if float(lat[0]) > float(lat[-1]):
         lat_slice = slice(LAT_MAX, LAT_MIN)
@@ -76,8 +97,6 @@ def grid_to_polygons(lats, lons, grid_2d):
         plt.close(fig)
 
     data = json.loads(geojson_str)
-    # dopisujemy czytelną nazwę poziomu (SLIGHT/ENHANCED/...) do każdego polygonu na podstawie
-    # jego dolnej granicy — i pomijamy poziom NONE (0-20%), bo nie ma sensu go rysować na mapie
     features_out = []
     for feature in data.get("features", []):
         title = feature["properties"].get("title", "")
@@ -99,46 +118,72 @@ def grid_to_polygons(lats, lons, grid_2d):
     return {"type": "FeatureCollection", "features": features_out}
 
 
+def probabilities_and_areas(stacked, thresholds, lats, lons):
+    thresholds_out = {}
+    areas_out = {}
+    for t in thresholds:
+        prob = (stacked >= t).mean(dim="member") * 100
+        grid = np.round(prob.values, 0).astype(int).tolist()
+        thresholds_out[str(t)] = grid
+        areas_out[str(t)] = grid_to_polygons(lats, lons, grid)
+    return thresholds_out, areas_out
+
+
 def main():
     run_time = find_latest_run()
     print(f"Używam przebiegu: {run_time.isoformat()}")
 
-    member_grids = []
+    precip_member_grids = []
+    snow_member_grids = []
     failed = []
     lats = lons = None
 
     for m in MEMBERS:
         try:
-            total = None
+            precip_total = None
+            snow_total = None
             for start, end in WINDOWS:
                 fxx = end
-                search = f":APCP:surface:{start}-{end} hour acc"
-                H = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                           member=m, fxx=fxx, verbose=False)
-                ds = H.xarray(search, remove_grib=True)
-                cropped = crop_to_poland(ds["tp"])
-                total = cropped if total is None else total + cropped
+
+                # --- opad w tym oknie (jak dotychczas) ---
+                H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                             member=m, fxx=fxx, verbose=False)
+                ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
+                precip_window = crop_to_region(ds_p["tp"])
+
+                # --- temperatura na koniec tego okna (NOWOŚĆ) ---
+                H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                             member=m, fxx=fxx, verbose=False)
+                ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
+                t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15  # Kelwiny -> stopnie C
+
+                # opad w tym oknie liczy się jako śnieg tylko tam, gdzie jest dość zimno;
+                # przelicznik (snow:liquid ratio) zależy od temperatury w danym punkcie
+                is_snow = t2m_window_c <= SNOW_TEMP_THRESHOLD_C
+                ratio = snow_ratio(t2m_window_c)
+                snow_window_cm = xr.where(is_snow, precip_window / 10.0 * ratio, 0.0)
+
+                precip_total = precip_window if precip_total is None else precip_total + precip_window
+                snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
+
             if lats is None:
-                lats = [round(float(x), 3) for x in total.latitude.values]
-                lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in total.longitude.values]
-            member_grids.append(total)
+                lats = [round(float(x), 3) for x in precip_total.latitude.values]
+                lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
+            precip_member_grids.append(precip_total)
+            snow_member_grids.append(snow_total)
             print(f"  człon {m:>2}: OK")
         except Exception as e:
             failed.append(m)
             print(f"  człon {m:>2}: BŁĄD ({e})")
 
-    if not member_grids:
+    if not precip_member_grids:
         raise RuntimeError("Żaden człon się nie udał — przerywam bez zapisu pliku")
 
-    stacked = xr.concat(member_grids, dim="member")
+    stacked_precip = xr.concat(precip_member_grids, dim="member")
+    stacked_snow = xr.concat(snow_member_grids, dim="member")
 
-    thresholds_out = {}
-    areas_out = {}
-    for t in THRESHOLDS_MM:
-        prob = (stacked >= t).mean(dim="member") * 100
-        grid = np.round(prob.values, 0).astype(int).tolist()
-        thresholds_out[str(t)] = grid
-        areas_out[str(t)] = grid_to_polygons(lats, lons, grid)
+    precip_thresholds_out, precip_areas_out = probabilities_and_areas(stacked_precip, THRESHOLDS_MM, lats, lons)
+    snow_thresholds_out, snow_areas_out = probabilities_and_areas(stacked_snow, SNOW_THRESHOLDS_CM, lats, lons)
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -148,7 +193,7 @@ def main():
         "model_run": run_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "valid_from": valid_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "valid_to": valid_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "members_used": len(member_grids),
+        "members_used": len(precip_member_grids),
         "members_failed": failed,
         "grid": {
             "lat": lats,
@@ -156,18 +201,26 @@ def main():
         },
         "hazards": {
             "precip_24h_mm": {
-                "note": "Prawdopodobienstwo (%) przekroczenia progu opadu w mm wody na 24h. "
-                        "TO NIE JEST jeszcze grubosc sniegu w cm - przeliczenie planowane w kolejnym etapie.",
-                "thresholds": thresholds_out,
-                "areas": areas_out,
-            }
+                "note": "Prawdopodobienstwo (%) przekroczenia progu opadu w mm wody na 24h "
+                        "(niezaleznie od tego czy to snieg czy deszcz).",
+                "thresholds": precip_thresholds_out,
+                "areas": precip_areas_out,
+            },
+            "snow_24h_cm": {
+                "note": "Prawdopodobienstwo (%) przekroczenia progu grubosci SNIEGU (cm) na 24h. "
+                        "Liczone tylko z opadu w oknach czasowych gdzie T2m <= "
+                        f"{SNOW_TEMP_THRESHOLD_C}C, z przelicznikiem opad->snieg zaleznym "
+                        "od temperatury (uproszczona tabela robocza, do kalibracji).",
+                "thresholds": snow_thresholds_out,
+                "areas": snow_areas_out,
+            },
         },
     }
 
     with open("swwf.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"\nZapisano swwf.json ({len(member_grids)}/{len(MEMBERS)} członków użytych)")
+    print(f"\nZapisano swwf.json ({len(precip_member_grids)}/{len(MEMBERS)} członków użytych)")
 
 
 if __name__ == "__main__":
