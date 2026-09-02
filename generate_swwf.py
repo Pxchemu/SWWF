@@ -44,6 +44,7 @@ WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
 MEMBERS = list(range(1, 31))
 THRESHOLDS_MM = [1, 5, 10, 20]      # progi dla samego opadu (mm wody)
 SNOW_THRESHOLDS_CM = [5, 10, 20]    # progi dla śniegu (cm) — zgodnie z dokumentem planu
+COLD_THRESHOLDS_C = [-15, -10, -5]  # progi dla mrozu — im niższa liczba, tym rzadziej przekraczana
 
 # próg temperatury, powyżej którego opad w danym oknie liczymy jako deszcz, nie śnieg
 # (lekko powyżej 0°C, bo mokry termometr chłodzi spadające krople/płatki)
@@ -131,11 +132,16 @@ def grid_to_polygons(lats, lons, grid_2d):
     return {"type": "FeatureCollection", "features": features_out}
 
 
-def probabilities_and_areas(stacked, thresholds, lats, lons):
+def probabilities_and_areas(stacked, thresholds, lats, lons, direction="ge"):
+    """direction="ge": prawdopodobieństwo, że wartość >= progu (opad, śnieg — im więcej, tym gorzej)
+    direction="le": prawdopodobieństwo, że wartość <= progu (mróz — im niżej, tym gorzej)"""
     thresholds_out = {}
     areas_out = {}
     for t in thresholds:
-        prob = (stacked >= t).mean(dim="member") * 100
+        if direction == "le":
+            prob = (stacked <= t).mean(dim="member") * 100
+        else:
+            prob = (stacked >= t).mean(dim="member") * 100
         grid = np.round(prob.values, 0).astype(int).tolist()
         thresholds_out[str(t)] = grid
         areas_out[str(t)] = grid_to_polygons(lats, lons, grid)
@@ -148,6 +154,7 @@ def main():
 
     precip_member_grids = []
     snow_member_grids = []
+    cold_member_grids = []
     failed = []
     lats = lons = None
 
@@ -155,6 +162,7 @@ def main():
         try:
             precip_total = None
             snow_total = None
+            min_t2m = None
             for start, end in WINDOWS:
                 fxx = end
 
@@ -164,7 +172,7 @@ def main():
                 ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
                 precip_window = crop_to_region(ds_p["tp"])
 
-                # --- temperatura na koniec tego okna (NOWOŚĆ) ---
+                # --- temperatura na koniec tego okna ---
                 H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                              member=m, fxx=fxx, priority=["aws"], verbose=False)
                 ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
@@ -178,12 +186,16 @@ def main():
 
                 precip_total = precip_window if precip_total is None else precip_total + precip_window
                 snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
+                # COLD: interesuje nas NAJNIŻSZA temperatura osiągnięta w ciągu doby
+                # (z 4 odczytów co 6h — przybliżenie, nie prawdziwe minimum ciągłe)
+                min_t2m = t2m_window_c if min_t2m is None else xr.where(t2m_window_c < min_t2m, t2m_window_c, min_t2m)
 
             if lats is None:
                 lats = [round(float(x), 3) for x in precip_total.latitude.values]
                 lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
             precip_member_grids.append(precip_total)
             snow_member_grids.append(snow_total)
+            cold_member_grids.append(min_t2m)
             print(f"  człon {m:>2}: OK")
         except Exception as e:
             failed.append(m)
@@ -194,9 +206,11 @@ def main():
 
     stacked_precip = xr.concat(precip_member_grids, dim="member")
     stacked_snow = xr.concat(snow_member_grids, dim="member")
+    stacked_cold = xr.concat(cold_member_grids, dim="member")
 
     precip_thresholds_out, precip_areas_out = probabilities_and_areas(stacked_precip, THRESHOLDS_MM, lats, lons)
     snow_thresholds_out, snow_areas_out = probabilities_and_areas(stacked_snow, SNOW_THRESHOLDS_CM, lats, lons)
+    cold_thresholds_out, cold_areas_out = probabilities_and_areas(stacked_cold, COLD_THRESHOLDS_C, lats, lons, direction="le")
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -226,6 +240,13 @@ def main():
                         "od temperatury (uproszczona tabela robocza, do kalibracji).",
                 "thresholds": snow_thresholds_out,
                 "areas": snow_areas_out,
+            },
+            "cold_min_t2m_c": {
+                "note": "Prawdopodobienstwo (%), ze temperatura 2m spadnie ponizej progu (stopnie C) "
+                        "w ciagu najblizszych 24h. Liczone jako minimum z 4 odczytow co 6h "
+                        "(przyblizenie, nie prawdziwe ciagle minimum).",
+                "thresholds": cold_thresholds_out,
+                "areas": cold_areas_out,
             },
         },
     }
