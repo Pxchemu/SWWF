@@ -16,6 +16,10 @@ from herbie import Herbie
 import numpy as np
 import xarray as xr
 import json
+import matplotlib
+matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w GitHub Actions nie ma
+import matplotlib.pyplot as plt
+import geojsoncontour
 
 LAT_MIN, LAT_MAX = 48.5, 55.5
 LON_MIN, LON_MAX = 13.5, 24.5
@@ -24,6 +28,11 @@ LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
 MEMBERS = list(range(1, 31))
 THRESHOLDS_MM = [1, 5, 10, 20]
+
+# poziomy zagrożenia z dokumentu planu (sekcja 3) — progi robocze, do skalibrowania później
+LEVEL_BOUNDS = [0, 20, 40, 60, 80, 100]
+LEVEL_COLORS = ['#ffffff', '#fde047', '#fb923c', '#ef4444', '#a855f7']
+LEVEL_NAMES = ['NONE', 'SLIGHT', 'ENHANCED', 'MODERATE', 'HIGH']
 
 
 def find_latest_run():
@@ -52,6 +61,42 @@ def crop_to_poland(da):
     else:
         lat_slice = slice(LAT_MIN, LAT_MAX)
     return da.sel(latitude=lat_slice, longitude=slice(LON_MIN_360, LON_MAX_360))
+
+
+def grid_to_polygons(lats, lons, grid_2d):
+    """Zamienia siatkę liczb (% prawdopodobieństwa) na gotowe polygony GeoJSON,
+    pogrupowane wg poziomów zagrożenia SLIGHT/ENHANCED/MODERATE/HIGH."""
+    arr = np.array(grid_2d, dtype=float)
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    try:
+        cs = ax.contourf(lons, lats, arr, levels=LEVEL_BOUNDS, colors=LEVEL_COLORS)
+        geojson_str = geojsoncontour.contourf_to_geojson(contourf=cs, ndigits=3, fill_opacity=0.45)
+    finally:
+        plt.close(fig)
+
+    data = json.loads(geojson_str)
+    # dopisujemy czytelną nazwę poziomu (SLIGHT/ENHANCED/...) do każdego polygonu na podstawie
+    # jego dolnej granicy — i pomijamy poziom NONE (0-20%), bo nie ma sensu go rysować na mapie
+    features_out = []
+    for feature in data.get("features", []):
+        title = feature["properties"].get("title", "")
+        try:
+            lower_bound = float(title.split("-")[0].strip())
+        except (ValueError, IndexError):
+            lower_bound = 0
+        idx = 0
+        for i in range(len(LEVEL_BOUNDS) - 1):
+            if abs(LEVEL_BOUNDS[i] - lower_bound) < 0.5:
+                idx = i
+                break
+        level_name = LEVEL_NAMES[idx]
+        if level_name == "NONE":
+            continue
+        feature["properties"]["level"] = level_name
+        features_out.append(feature)
+
+    return {"type": "FeatureCollection", "features": features_out}
 
 
 def main():
@@ -88,10 +133,12 @@ def main():
     stacked = xr.concat(member_grids, dim="member")
 
     thresholds_out = {}
+    areas_out = {}
     for t in THRESHOLDS_MM:
         prob = (stacked >= t).mean(dim="member") * 100
         grid = np.round(prob.values, 0).astype(int).tolist()
         thresholds_out[str(t)] = grid
+        areas_out[str(t)] = grid_to_polygons(lats, lons, grid)
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -112,6 +159,7 @@ def main():
                 "note": "Prawdopodobienstwo (%) przekroczenia progu opadu w mm wody na 24h. "
                         "TO NIE JEST jeszcze grubosc sniegu w cm - przeliczenie planowane w kolejnym etapie.",
                 "thresholds": thresholds_out,
+                "areas": areas_out,
             }
         },
     }
