@@ -1,34 +1,45 @@
 """
-SWWF — test: czy da się użyć gęstszej siatki (0.25 stopnia zamiast 0.5)?
+SWWF — test: czy produkt atmos.25 (0.25°) dla GEFS jest FAKTYCZNIE dostępny
+na AWS dla wszystkich 30 członków i obu potrzebnych zmiennych (opad, temperatura)?
 
-GEFS ma osobny produkt "atmos.25" z dwukrotnie gęstszą siatką,
-dostępny podobno dla każdego członka osobno (nie tylko dla średniej).
-Sprawdzamy to na jednym pliku, zanim przerobimy na to cały skrypt produkcyjny.
+Wymuszamy priority=["aws"], żeby Herbie NIE mógł po cichu przełączyć się na
+NOMADS — jeśli czegoś nie ma na AWS, dostaniemy tu jawny "BRAK", zamiast
+mylącego "czasem działa, czasem nie" (bo czasem akurat NOMADS odpowiedział).
 """
 
 from datetime import datetime, timedelta, timezone
 from herbie import Herbie
 
 target_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d 00:00")
+FXX = 6
 
-print(f"Przebieg: {target_date} UTC, człon 1, produkt atmos.25 (0.25°)\n")
+print(f"Przebieg: {target_date} UTC, tylko AWS (priority=['aws'])\n")
 
-H = Herbie(target_date, model="gefs", product="atmos.25", member=1, fxx=6, verbose=False)
-print(f"Znaleziono plik? {H.grib is not None}")
+def check(member, search):
+    try:
+        H = Herbie(target_date, model="gefs", product="atmos.25", member=member, fxx=FXX,
+                   priority=["aws"], verbose=False)
+        if H.grib is None:
+            return False
+        H.xarray(search, remove_grib=True)
+        return True
+    except Exception:
+        return False
 
-print("\nWszystkie pola APCP dostępne w tym pliku (0.25°):")
-inv = H.inventory(search=":APCP:")
-print(inv.to_string())
+precip_results = []
+temp_results = []
 
-ds = H.xarray(":APCP:surface:0-6 hour acc", remove_grib=True)
-print(f"\nKształt siatki (globalnie): {ds['tp'].shape}")
-print(f"Dla porównania: przy 0.5° było to (361, 720)")
+for m in range(1, 31):
+    ok_p = check(m, ":APCP:surface:0-6 hour acc")
+    ok_t = check(m, ":TMP:2 m above ground:")
+    precip_results.append(ok_p)
+    temp_results.append(ok_t)
+    print(f"  człon {m:>2}: opad={'OK  ' if ok_p else 'BRAK'}   temperatura={'OK' if ok_t else 'BRAK'}")
 
-LAT_MIN, LAT_MAX = 48.5, 55.5
-LON_MIN_360, LON_MAX_360 = 13.5 % 360, 24.5 % 360
-lat = ds["tp"].latitude
-lat_slice = slice(LAT_MAX, LAT_MIN) if float(lat[0]) > float(lat[-1]) else slice(LAT_MIN, LAT_MAX)
-cropped = ds["tp"].sel(latitude=lat_slice, longitude=slice(LON_MIN_360, LON_MAX_360))
-print(f"\nKształt PO przycięciu do Polski: {cropped.shape}")
-print(f"Dla porównania: przy 0.5° było to (15, 23)")
-print(f"\nWartości: min {float(cropped.min()):.2f} mm, maks {float(cropped.max()):.2f} mm")
+print(f"\nOpad (APCP) dostępny na AWS dla: {sum(precip_results)}/30 członków")
+print(f"Temperatura (TMP) dostępna na AWS dla: {sum(temp_results)}/30 członków")
+
+if sum(precip_results) == 30 and sum(temp_results) == 30:
+    print("\n>>> WSZYSTKO jest na AWS — atmos.25 nadaje się do produkcji <<<")
+else:
+    print("\n>>> BRAKI na AWS — atmos.25 NIE nadaje się do niezawodnej automatyzacji <<<")
