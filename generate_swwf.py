@@ -10,6 +10,10 @@ prawdopodobieństwo:
   - ŚNIEGU (cm) — dla każdego okna 6h sprawdzamy T2m; jeśli jest wystarczająco
     zimno, opad z tego okna liczymy jako śnieg, z przelicznikiem zależnym
     od temperatury (zimniej = bardziej puchaty, mniej wody na cm)
+  - MROZU — minimum T2m z 4 odczytów w ciągu doby
+  - MARZNĄCEGO DESZCZU (ICE) — klasyczny układ "warm nose": zimna powierzchnia
+    (T2m) + cieplejsza warstwa nad nią (T850, z osobnego, rzadszego produktu,
+    interpolowana na naszą siatkę) + realny opad
 
 dla siatki punktów nad Europą Środkową (Niemcy, Polska, Czechy, Słowacja —
 siatka 0.25°), zapisuje jako swwf.json.
@@ -45,6 +49,14 @@ MEMBERS = list(range(1, 31))
 THRESHOLDS_MM = [1, 5, 10, 20]      # progi dla samego opadu (mm wody)
 SNOW_THRESHOLDS_CM = [5, 10, 20]    # progi dla śniegu (cm) — zgodnie z dokumentem planu
 COLD_THRESHOLDS_C = [-15, -10, -5]  # progi dla mrozu — im niższa liczba, tym rzadziej przekraczana
+ICE_THRESHOLDS = [1]                # ICE jest z natury tak/nie (0 albo 1) — jeden "próg" wystarcza
+
+# ICE (marznący deszcz): klasyczny układ to zimna powierzchnia + ciepła warstwa nad nią + padający
+# opad — krople topnieją/formują się w ciepłej warstwie w górze, po czym zamarzają przy kontakcie
+# z zimną powierzchnią. Progi robocze, do skalibrowania.
+SURFACE_FREEZE_THRESHOLD_C = -0.5   # T2m poniżej tego = powierzchnia realnie zamarznięta
+WARM_NOSE_THRESHOLD_C = 0.5         # T850 powyżej tego = wyraźna ciepła warstwa w górze ("warm nose")
+MIN_PRECIP_FOR_ICE_MM = 0.1         # musi w ogóle coś padać, żeby liczyć to jako marznący deszcz
 
 # próg temperatury, powyżej którego opad w danym oknie liczymy jako deszcz, nie śnieg
 # (lekko powyżej 0°C, bo mokry termometr chłodzi spadające krople/płatki)
@@ -96,6 +108,19 @@ def crop_to_region(da):
     else:
         lat_slice = slice(LAT_MIN, LAT_MAX)
     return da.sel(latitude=lat_slice, longitude=slice(LON_MIN_360, LON_MAX_360))
+
+
+def fetch_t850_interpolated(run_time, member, fxx, target_lat, target_lon):
+    """Pobiera T850 z PEŁNEGO produktu atmos.5 (0.5° — atmos.25 go nie ma) i interpoluje
+    na docelową, gęstszą siatkę 0.25° używaną przez resztę zmiennych (opad, T2m)."""
+    H = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
+               member=member, fxx=fxx, priority=["aws"], verbose=False)
+    ds = H.xarray(":TMP:850 mb:", remove_grib=True)
+    # nie zakładamy z góry dokładnej nazwy zmiennej w cfgrib (dla poziomów ciśnienia bywa
+    # inna niż "t2m") — bierzemy po prostu jedyną zmienną, jaka jest w tym pliku
+    da = ds[list(ds.data_vars)[0]]
+    t850 = crop_to_region(da) - 273.15  # Kelwiny -> stopnie C
+    return t850.interp(latitude=target_lat, longitude=target_lon)
 
 
 def grid_to_polygons(lats, lons, grid_2d):
@@ -155,6 +180,7 @@ def main():
     precip_member_grids = []
     snow_member_grids = []
     cold_member_grids = []
+    ice_member_grids = []
     failed = []
     lats = lons = None
 
@@ -163,6 +189,7 @@ def main():
             precip_total = None
             snow_total = None
             min_t2m = None
+            ice_any = None
             for start, end in WINDOWS:
                 fxx = end
 
@@ -190,12 +217,23 @@ def main():
                 # (z 4 odczytów co 6h — przybliżenie, nie prawdziwe minimum ciągłe)
                 min_t2m = t2m_window_c if min_t2m is None else xr.where(t2m_window_c < min_t2m, t2m_window_c, min_t2m)
 
+                # --- ICE: T850 z osobnego, pełnego produktu + interpolacja na naszą siatkę ---
+                t850_window_c = fetch_t850_interpolated(run_time, m, fxx, t2m_window_c.latitude, t2m_window_c.longitude)
+                warm_nose = (t2m_window_c <= SURFACE_FREEZE_THRESHOLD_C) & \
+                            (t850_window_c >= WARM_NOSE_THRESHOLD_C) & \
+                            (precip_window >= MIN_PRECIP_FOR_ICE_MM)
+                ice_window = xr.where(warm_nose, 1, 0)
+                # w ciągu doby wystarczy, że warunek na marznący deszcz wystąpił w KTÓRYMKOLWIEK
+                # z 4 okien — stąd maksimum (logiczne "LUB"), nie suma
+                ice_any = ice_window if ice_any is None else xr.where(ice_window > ice_any, ice_window, ice_any)
+
             if lats is None:
                 lats = [round(float(x), 3) for x in precip_total.latitude.values]
                 lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
             precip_member_grids.append(precip_total)
             snow_member_grids.append(snow_total)
             cold_member_grids.append(min_t2m)
+            ice_member_grids.append(ice_any)
             print(f"  człon {m:>2}: OK")
         except Exception as e:
             failed.append(m)
@@ -207,10 +245,12 @@ def main():
     stacked_precip = xr.concat(precip_member_grids, dim="member")
     stacked_snow = xr.concat(snow_member_grids, dim="member")
     stacked_cold = xr.concat(cold_member_grids, dim="member")
+    stacked_ice = xr.concat(ice_member_grids, dim="member")
 
     precip_thresholds_out, precip_areas_out = probabilities_and_areas(stacked_precip, THRESHOLDS_MM, lats, lons)
     snow_thresholds_out, snow_areas_out = probabilities_and_areas(stacked_snow, SNOW_THRESHOLDS_CM, lats, lons)
     cold_thresholds_out, cold_areas_out = probabilities_and_areas(stacked_cold, COLD_THRESHOLDS_C, lats, lons, direction="le")
+    ice_thresholds_out, ice_areas_out = probabilities_and_areas(stacked_ice, ICE_THRESHOLDS, lats, lons)
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -247,6 +287,16 @@ def main():
                         "(przyblizenie, nie prawdziwe ciagle minimum).",
                 "thresholds": cold_thresholds_out,
                 "areas": cold_areas_out,
+            },
+            "ice_freezing_rain": {
+                "note": "Prawdopodobienstwo (%) wystapienia marznacego deszczu (T2m <= "
+                        f"{SURFACE_FREEZE_THRESHOLD_C}C, T850 >= {WARM_NOSE_THRESHOLD_C}C - "
+                        "cieplejsza warstwa nad zamarznieta powierzchnia - i realny opad) "
+                        "w KTORYMKOLWIEK z 4 okien 6h w ciagu doby. T850 pochodzi z osobnego, "
+                        "rzadszego produktu (0.5 stopnia) i jest interpolowane na siatke "
+                        "reszty zmiennych (0.25 stopnia).",
+                "thresholds": ice_thresholds_out,
+                "areas": ice_areas_out,
             },
         },
     }
