@@ -4,8 +4,8 @@ SWWF — generowanie swwf.json.
 Znajduje najnowszy DOSTĘPNY przebieg GEFS (nie zawsze najnowszy w ogóle —
 dane pojawiają się na AWS z opóźnieniem, więc sprawdzamy kolejne wstecz,
 aż trafimy na taki, który już jest), liczy prawdopodobieństwo opadu
->= różnych progów dla siatki punktów nad Polską (siatka 0.25°, ~1300
-punktów), zapisuje jako swwf.json.
+>= różnych progów dla siatki punktów nad Europą Środkową (Niemcy, Polska,
+Czechy, Słowacja — siatka 0.25°), zapisuje jako swwf.json.
 
 UWAGA: na razie tylko opad (mm wody), NIE przeliczenie na śnieg (cm) —
 to świadomie odłożone na później (patrz plan projektu, sekcja 4).
@@ -21,8 +21,8 @@ matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w Gi
 import matplotlib.pyplot as plt
 import geojsoncontour
 
-LAT_MIN, LAT_MAX = 48.5, 55.5
-LON_MIN, LON_MAX = 13.5, 24.5
+LAT_MIN, LAT_MAX = 46.8, 55.5
+LON_MIN, LON_MAX = 5.5, 24.5
 LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
