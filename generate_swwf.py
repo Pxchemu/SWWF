@@ -4,7 +4,8 @@ SWWF — generowanie swwf.json.
 Znajduje najnowszy DOSTĘPNY przebieg GEFS (nie zawsze najnowszy w ogóle —
 dane pojawiają się na AWS z opóźnieniem, więc sprawdzamy kolejne wstecz,
 aż trafimy na taki, który już jest), liczy prawdopodobieństwo opadu
->= różnych progów dla siatki punktów nad Polską, zapisuje jako swwf.json.
+>= różnych progów dla siatki punktów nad Polską (siatka 0.25°, ~1300
+punktów), zapisuje jako swwf.json.
 
 UWAGA: na razie tylko opad (mm wody), NIE przeliczenie na śnieg (cm) —
 to świadomie odłożone na później (patrz plan projektu, sekcja 4).
@@ -35,7 +36,7 @@ def find_latest_run():
     for i in range(8):  # sprawdź do 48h wstecz
         test_time = candidate - timedelta(hours=6 * i)
         try:
-            H = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
+            H = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                        member=1, fxx=6, verbose=False)
             if H.grib is not None:
                 return test_time
@@ -67,7 +68,7 @@ def main():
             for start, end in WINDOWS:
                 fxx = end
                 search = f":APCP:surface:{start}-{end} hour acc"
-                H = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.5",
+                H = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                            member=m, fxx=fxx, verbose=False)
                 ds = H.xarray(search, remove_grib=True)
                 cropped = crop_to_poland(ds["tp"])
