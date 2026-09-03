@@ -42,13 +42,8 @@ matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w Gi
 import matplotlib.pyplot as plt
 import geojsoncontour
 
-# === TYMCZASOWO: mały kawałek Grenlandii, do wizualnej i liczbowej weryfikacji ===
-# === wszystkich 5 hazardów naraz (prawdziwe mrozy/śnieg/wiatr o tej porze roku)  ===
-# === docelowy obszar (Europa Środkowa) zakomentowany niżej — WRÓCIĆ PO TEŚCIE   ===
-LAT_MIN, LAT_MAX = 70.0, 72.5
-LON_MIN, LON_MAX = -42.0, -38.0
-# LAT_MIN, LAT_MAX = 46.8, 55.5   # <- docelowy obszar: Niemcy/Polska/Czechy/Słowacja
-# LON_MIN, LON_MAX = 5.5, 24.5
+LAT_MIN, LAT_MAX = 46.8, 55.5   # Niemcy/Polska/Czechy/Słowacja
+LON_MIN, LON_MAX = 5.5, 24.5
 LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
@@ -190,6 +185,35 @@ def probabilities_and_areas(stacked, thresholds, lats, lons, direction="ge"):
     return thresholds_out, areas_out
 
 
+def level_index(prob_grid_list):
+    """Zamienia siatkę procentów (0-100, jako zwykła lista list) na siatkę indeksów
+    poziomu zagrożenia: 0=NONE, 1=SLIGHT, 2=ENHANCED, 3=MODERATE, 4=HIGH."""
+    arr = np.array(prob_grid_list, dtype=float)
+    idx = np.zeros_like(arr, dtype=int)
+    for i in range(len(LEVEL_BOUNDS) - 1):
+        lo, hi = LEVEL_BOUNDS[i], LEVEL_BOUNDS[i + 1]
+        mask = (arr >= lo) & (arr <= hi) if hi == 100 else (arr >= lo) & (arr < hi)
+        idx[mask] = i
+    return idx
+
+
+def combine_general_risk(snow_idx, cold_idx, ice_idx, blizzard_idx):
+    """GENERAL WINTER RISK — celowo NIE prosta suma (patrz dokument planu, sekcja 2/6):
+    bazowy poziom to NAJGROŹNIEJSZY z czterech hazardów w danym punkcie, ale jeśli co
+    najmniej DWA hazardy jednocześnie osiągają ENHANCED lub wyżej, całość podbijamy
+    o jeden poziom (kombinacja zagrożeń jest gorsza niż którekolwiek z osobna)."""
+    max_idx = np.maximum.reduce([snow_idx, cold_idx, ice_idx, blizzard_idx])
+    compound_count = ((snow_idx >= 2).astype(int) + (cold_idx >= 2).astype(int) +
+                       (ice_idx >= 2).astype(int) + (blizzard_idx >= 2).astype(int))
+    bump = (compound_count >= 2).astype(int)
+    general_idx = np.minimum(max_idx + bump, len(LEVEL_NAMES) - 1)
+    # przeliczamy indeks z powrotem na "procent" tak, żeby trafiał w te same przedziały
+    # LEVEL_BOUNDS (0/20/40/60/80/100) i dało się użyć TEJ SAMEJ funkcji grid_to_polygons
+    # bez pisania jej drugi raz — 0→0%, 1→25%, 2→50%, 3→75%, 4→100%, każdy trafia w środek
+    # właściwego przedziału swojego poziomu
+    return (general_idx * 25).tolist()
+
+
 def main():
     run_time = find_latest_run()
     print(f"Używam przebiegu: {run_time.isoformat()}")
@@ -285,14 +309,14 @@ def main():
     ice_thresholds_out, ice_areas_out = probabilities_and_areas(stacked_ice, ICE_THRESHOLDS, lats, lons)
     blizzard_thresholds_out, blizzard_areas_out = probabilities_and_areas(stacked_blizzard, BLIZZARD_THRESHOLDS, lats, lons)
 
-    # --- TYMCZASOWE: sanity-check zakresów liczb (do usunięcia po weryfikacji nad Grenlandią) ---
-    print("\n--- Zakresy wartości (surowe, przed progowaniem) ---")
-    print(f"Opad (mm):        min {float(stacked_precip.min()):.1f}   maks {float(stacked_precip.max()):.1f}")
-    print(f"Śnieg (cm):       min {float(stacked_snow.min()):.1f}   maks {float(stacked_snow.max()):.1f}")
-    print(f"Temperatura (C):  min {float(stacked_cold.min()):.1f}   maks {float(stacked_cold.max()):.1f}")
-    print(f"ICE wystąpił u ilu członków/punktów (0-1): min {float(stacked_ice.min()):.2f}   maks {float(stacked_ice.max()):.2f}")
-    print(f"BLIZZARD wystąpił u ilu członków/punktów (0-1): min {float(stacked_blizzard.min()):.2f}   maks {float(stacked_blizzard.max()):.2f}")
-    print("---\n")
+    # --- GENERAL WINTER RISK: łączymy cztery hazardy po jednym reprezentatywnym progu każdy ---
+    snow_idx = level_index(snow_thresholds_out[str(SNOW_THRESHOLDS_CM[1])])    # 10cm — środkowy próg
+    cold_idx = level_index(cold_thresholds_out[str(COLD_THRESHOLDS_C[1])])     # -10C — środkowy próg
+    ice_idx = level_index(ice_thresholds_out[str(ICE_THRESHOLDS[0])])
+    blizzard_idx = level_index(blizzard_thresholds_out[str(BLIZZARD_THRESHOLDS[0])])
+    general_grid = combine_general_risk(snow_idx, cold_idx, ice_idx, blizzard_idx)
+    general_thresholds_out = {"risk": general_grid}
+    general_areas_out = {"risk": grid_to_polygons(lats, lons, general_grid)}
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -349,6 +373,17 @@ def main():
                         "unoszacy STARY snieg bez nowych opadow).",
                 "thresholds": blizzard_thresholds_out,
                 "areas": blizzard_areas_out,
+            },
+            "general_winter_risk": {
+                "note": "Polaczenie SNOW+COLD+ICE+BLIZZARD w jeden wskaznik - NIE prosta suma. "
+                        "Bazowy poziom to najgrozniejszy z czterech hazardow w danym punkcie; "
+                        "jesli co najmniej DWA hazardy jednoczesnie osiagaja ENHANCED lub wyzej, "
+                        "calosc podbijana o jeden poziom. Wartosc w 'thresholds' to nie procent "
+                        "prawdopodobienstwa jak w innych hazardach, tylko poziom zagrozenia "
+                        "zakodowany jako 0/25/50/75/100 (odpowiednio NONE/SLIGHT/ENHANCED/"
+                        "MODERATE/HIGH) - do odczytu przez te same granice co reszta (LEVEL_BOUNDS).",
+                "thresholds": general_thresholds_out,
+                "areas": general_areas_out,
             },
         },
     }
