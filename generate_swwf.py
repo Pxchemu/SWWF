@@ -42,8 +42,13 @@ matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w Gi
 import matplotlib.pyplot as plt
 import geojsoncontour
 
-LAT_MIN, LAT_MAX = 46.8, 55.5
-LON_MIN, LON_MAX = 5.5, 24.5
+# === TYMCZASOWO: mały kawałek Grenlandii, do wizualnej i liczbowej weryfikacji ===
+# === wszystkich 5 hazardów naraz (prawdziwe mrozy/śnieg/wiatr o tej porze roku)  ===
+# === docelowy obszar (Europa Środkowa) zakomentowany niżej — WRÓCIĆ PO TEŚCIE   ===
+LAT_MIN, LAT_MAX = 70.0, 72.5
+LON_MIN, LON_MAX = -42.0, -38.0
+# LAT_MIN, LAT_MAX = 46.8, 55.5   # <- docelowy obszar: Niemcy/Polska/Czechy/Słowacja
+# LON_MIN, LON_MAX = 5.5, 24.5
 LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
@@ -279,6 +284,15 @@ def main():
     cold_thresholds_out, cold_areas_out = probabilities_and_areas(stacked_cold, COLD_THRESHOLDS_C, lats, lons, direction="le")
     ice_thresholds_out, ice_areas_out = probabilities_and_areas(stacked_ice, ICE_THRESHOLDS, lats, lons)
     blizzard_thresholds_out, blizzard_areas_out = probabilities_and_areas(stacked_blizzard, BLIZZARD_THRESHOLDS, lats, lons)
+
+    # --- TYMCZASOWE: sanity-check zakresów liczb (do usunięcia po weryfikacji nad Grenlandią) ---
+    print("\n--- Zakresy wartości (surowe, przed progowaniem) ---")
+    print(f"Opad (mm):        min {float(stacked_precip.min()):.1f}   maks {float(stacked_precip.max()):.1f}")
+    print(f"Śnieg (cm):       min {float(stacked_snow.min()):.1f}   maks {float(stacked_snow.max()):.1f}")
+    print(f"Temperatura (C):  min {float(stacked_cold.min()):.1f}   maks {float(stacked_cold.max()):.1f}")
+    print(f"ICE wystąpił u ilu członków/punktów (0-1): min {float(stacked_ice.min()):.2f}   maks {float(stacked_ice.max()):.2f}")
+    print(f"BLIZZARD wystąpił u ilu członków/punktów (0-1): min {float(stacked_blizzard.min()):.2f}   maks {float(stacked_blizzard.max()):.2f}")
+    print("---\n")
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
