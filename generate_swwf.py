@@ -14,6 +14,8 @@ prawdopodobieństwo:
   - MARZNĄCEGO DESZCZU (ICE) — klasyczny układ "warm nose": zimna powierzchnia
     (T2m) + cieplejsza warstwa nad nią (T850, z osobnego, rzadszego produktu,
     interpolowana na naszą siatkę) + realny opad
+  - ZAMIECI (BLIZZARD) — poryw wiatru (GUST) + świeży śnieg w tym samym oknie
+    (brak realnej pokrywy śniegu w danych — pomija "ground blizzard", patrz sekcja 9 planu)
 
 dla siatki punktów nad Europą Środkową (Niemcy, Polska, Czechy, Słowacja —
 siatka 0.25°), zapisuje jako swwf.json.
@@ -57,6 +59,16 @@ ICE_THRESHOLDS = [1]                # ICE jest z natury tak/nie (0 albo 1) — j
 SURFACE_FREEZE_THRESHOLD_C = -0.5   # T2m poniżej tego = powierzchnia realnie zamarznięta
 WARM_NOSE_THRESHOLD_C = 0.5         # T850 powyżej tego = wyraźna ciepła warstwa w górze ("warm nose")
 MIN_PRECIP_FOR_ICE_MM = 0.1         # musi w ogóle coś padać, żeby liczyć to jako marznący deszcz
+
+BLIZZARD_THRESHOLDS = [1]           # tak jak ICE, z natury tak/nie
+# klasyczna definicja zamieci (NWS): utrzymujący się wiatr LUB częste porywy >=35mph (~15.5 m/s)
+# razem z padającym/unoszonym śniegiem. Używamy GUST (poryw), bo to dokładnie ta zmienna,
+# na której opiera się definicja - nie średni wiatr.
+BLIZZARD_GUST_THRESHOLD_MS = 15.5
+# brakuje nam realnej pokrywy śnieżnej na ziemi (patrz sekcja 9 dokumentu planu) - jako namiastkę
+# "śniegu dostępnego do unoszenia" używamy własnego, już liczonego świeżego opadu śniegu w tym
+# oknie (to pomija "ground blizzard" - sam wiatr unoszący STARY śnieg bez nowych opadów)
+MIN_FRESH_SNOW_FOR_BLIZZARD_CM = 0.5
 
 # próg temperatury, powyżej którego opad w danym oknie liczymy jako deszcz, nie śnieg
 # (lekko powyżej 0°C, bo mokry termometr chłodzi spadające krople/płatki)
@@ -181,6 +193,7 @@ def main():
     snow_member_grids = []
     cold_member_grids = []
     ice_member_grids = []
+    blizzard_member_grids = []
     failed = []
     lats = lons = None
 
@@ -190,6 +203,7 @@ def main():
             snow_total = None
             min_t2m = None
             ice_any = None
+            blizzard_any = None
             for start, end in WINDOWS:
                 fxx = end
 
@@ -227,6 +241,17 @@ def main():
                 # z 4 okien — stąd maksimum (logiczne "LUB"), nie suma
                 ice_any = ice_window if ice_any is None else xr.where(ice_window > ice_any, ice_window, ice_any)
 
+                # --- BLIZZARD: poryw wiatru (GUST) + świeży śnieg w tym samym oknie ---
+                H_g = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                             member=m, fxx=fxx, priority=["aws"], verbose=False)
+                ds_g = H_g.xarray(":GUST:surface:", remove_grib=True)
+                gust_window = crop_to_region(ds_g[list(ds_g.data_vars)[0]])
+                blizzard_condition = (gust_window >= BLIZZARD_GUST_THRESHOLD_MS) & \
+                                     (snow_window_cm >= MIN_FRESH_SNOW_FOR_BLIZZARD_CM)
+                blizzard_window = xr.where(blizzard_condition, 1, 0)
+                blizzard_any = blizzard_window if blizzard_any is None else \
+                    xr.where(blizzard_window > blizzard_any, blizzard_window, blizzard_any)
+
             if lats is None:
                 lats = [round(float(x), 3) for x in precip_total.latitude.values]
                 lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
@@ -234,6 +259,7 @@ def main():
             snow_member_grids.append(snow_total)
             cold_member_grids.append(min_t2m)
             ice_member_grids.append(ice_any)
+            blizzard_member_grids.append(blizzard_any)
             print(f"  człon {m:>2}: OK")
         except Exception as e:
             failed.append(m)
@@ -246,11 +272,13 @@ def main():
     stacked_snow = xr.concat(snow_member_grids, dim="member")
     stacked_cold = xr.concat(cold_member_grids, dim="member")
     stacked_ice = xr.concat(ice_member_grids, dim="member")
+    stacked_blizzard = xr.concat(blizzard_member_grids, dim="member")
 
     precip_thresholds_out, precip_areas_out = probabilities_and_areas(stacked_precip, THRESHOLDS_MM, lats, lons)
     snow_thresholds_out, snow_areas_out = probabilities_and_areas(stacked_snow, SNOW_THRESHOLDS_CM, lats, lons)
     cold_thresholds_out, cold_areas_out = probabilities_and_areas(stacked_cold, COLD_THRESHOLDS_C, lats, lons, direction="le")
     ice_thresholds_out, ice_areas_out = probabilities_and_areas(stacked_ice, ICE_THRESHOLDS, lats, lons)
+    blizzard_thresholds_out, blizzard_areas_out = probabilities_and_areas(stacked_blizzard, BLIZZARD_THRESHOLDS, lats, lons)
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -297,6 +325,16 @@ def main():
                         "reszty zmiennych (0.25 stopnia).",
                 "thresholds": ice_thresholds_out,
                 "areas": ice_areas_out,
+            },
+            "blizzard": {
+                "note": "Prawdopodobienstwo (%) wystapienia warunkow zamieci: poryw wiatru (GUST) "
+                        f">= {BLIZZARD_GUST_THRESHOLD_MS} m/s razem ze swiezym sniegiem "
+                        f"(>= {MIN_FRESH_SNOW_FOR_BLIZZARD_CM}cm) w tym samym oknie 6h, w "
+                        "KTORYMKOLWIEK z 4 okien w ciagu doby. UWAGA: brak realnej pokrywy "
+                        "sniegu na ziemi w danych - to pomija tzw. ground blizzard (sam wiatr "
+                        "unoszacy STARY snieg bez nowych opadow).",
+                "thresholds": blizzard_thresholds_out,
+                "areas": blizzard_areas_out,
             },
         },
     }
