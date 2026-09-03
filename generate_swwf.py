@@ -27,6 +27,11 @@ UWAGA 2: produkt 0.25° (atmos.25) JEST w pełni dostępny na AWS dla wszystkich
 30 członków — priority=["aws"] wymuszone wszędzie, żeby nigdy po cichu nie
 spadać na zawodny NOMADS. T850 (potrzebna do ICE) nie jest w atmos.25 — pobierana
 osobno z pełnego atmos.5 (0.5°) i interpolowana na naszą gęstszą siatkę.
+
+UWAGA 3: polygony są wygładzane (interpolacja siatki x4 przed konturowaniem),
+przycinane do lądu (Natural Earth, żeby nie kolorować morza) i filtrowane
+z drobnych skrawków na granicach (prawdopodobne artefakty interpolacji, nie
+realne obszary zagrożenia) — patrz grid_to_polygons().
 """
 
 from datetime import datetime, timedelta, timezone
@@ -38,10 +43,25 @@ import matplotlib
 matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w GitHub Actions nie ma
 import matplotlib.pyplot as plt
 import geojsoncontour
+import requests
+from scipy.ndimage import zoom as ndimage_zoom
+from shapely.geometry import shape as shapely_shape, box as shapely_box, mapping as shapely_mapping
+from shapely.ops import unary_union
 
 LAT_MIN, LAT_MAX = 46.8, 55.5   # Niemcy/Polska/Czechy/Słowacja
 LON_MIN, LON_MAX = 5.5, 24.5
 LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
+
+# granice lądu (Natural Earth, domena publiczna) — do przycinania hazardów tylko do lądu,
+# żeby nie kolorować morza (Bałtyk itd.) tam gdzie opad/śnieg nas nie interesuje
+LAND_GEOJSON_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson"
+
+# o ile zagęszczamy siatkę przed konturowaniem, żeby granice polygonów były gładkie,
+# nie kanciaste (jak dotychczas, bezpośrednio z siatki 0.25°)
+POLYGON_SMOOTHING_FACTOR = 4
+# minimalna powierzchnia polygonu (w stopniach²), poniżej której traktujemy go jako
+# artefakt interpolacji/szum na granicy, nie realny obszar zagrożenia
+MIN_POLYGON_AREA_DEG2 = 0.03
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
 MEMBERS = list(range(1, 31))
@@ -130,15 +150,37 @@ def fetch_t850_interpolated(run_time, member, fxx, target_lat, target_lon):
     return t850.interp(latitude=target_lat, longitude=target_lon)
 
 
-def grid_to_polygons(lats, lons, level_idx_grid):
-    """Zamienia siatkę indeksów poziomu zagrożenia (0-5) na gotowe polygony GeoJSON,
-    kolorowane dokładnie tak samo jak macierz CESTOF."""
+def build_land_mask():
+    """Pobiera granice lądu (Natural Earth) i buduje jedną geometrię (unię) tylko z tych
+    fragmentów, które faktycznie przecinają nasz region — reszta świata nas nie interesuje,
+    a to znacznie przyspiesza późniejsze przycinanie."""
+    resp = requests.get(LAND_GEOJSON_URL, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    region_box = shapely_box(LON_MIN, LAT_MIN, LON_MAX, LAT_MAX)
+    relevant = [shapely_shape(f["geometry"]) for f in data["features"]
+                if shapely_shape(f["geometry"]).intersects(region_box)]
+    return unary_union(relevant)
+
+
+def grid_to_polygons(lats, lons, level_idx_grid, land_mask=None):
+    """Zamienia siatkę indeksów poziomu zagrożenia (0-5) na gotowe polygony GeoJSON:
+    1) zagęszcza siatkę przed konturowaniem (gładkie granice zamiast kanciastych),
+    2) przycina wynik do lądu (nie kolorujemy morza),
+    3) odrzuca drobne, prawdopodobnie fałszywe skrawki na granicach."""
     arr = np.array(level_idx_grid, dtype=float)
+
+    # --- 1) wygładzanie: zagęszczamy siatkę interpolacją, zanim policzymy kontury ---
+    arr_smooth = ndimage_zoom(arr, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest")
+    arr_smooth = np.clip(arr_smooth, 0, len(MATRIX_LEVEL_NAMES) - 1)
+    lats_smooth = np.linspace(lats[0], lats[-1], arr_smooth.shape[0])
+    lons_smooth = np.linspace(lons[0], lons[-1], arr_smooth.shape[1])
+
     fig = plt.figure()
     ax = fig.add_subplot(111)
     try:
         bounds = [i - 0.5 for i in range(len(MATRIX_LEVEL_NAMES) + 1)]  # -0.5 .. 5.5
-        cs = ax.contourf(lons, lats, arr, levels=bounds, colors=MATRIX_LEVEL_COLORS)
+        cs = ax.contourf(lons_smooth, lats_smooth, arr_smooth, levels=bounds, colors=MATRIX_LEVEL_COLORS)
         geojson_str = geojsoncontour.contourf_to_geojson(contourf=cs, ndigits=3, fill_opacity=0.5)
     finally:
         plt.close(fig)
@@ -155,6 +197,25 @@ def grid_to_polygons(lats, lons, level_idx_grid):
         level_name = MATRIX_LEVEL_NAMES[idx]
         if level_name == "NONE":
             continue
+
+        geom = shapely_shape(feature["geometry"])
+
+        # --- 2) przycinamy do lądu (nie kolorujemy morza) ---
+        if land_mask is not None:
+            geom = geom.intersection(land_mask)
+            if geom.is_empty:
+                continue
+
+        # --- 3) odrzucamy drobne skrawki (artefakty interpolacji na granicach) ---
+        if geom.geom_type == "MultiPolygon":
+            kept = [g for g in geom.geoms if g.area >= MIN_POLYGON_AREA_DEG2]
+            if not kept:
+                continue
+            geom = kept[0] if len(kept) == 1 else unary_union(kept)
+        elif geom.area < MIN_POLYGON_AREA_DEG2:
+            continue
+
+        feature["geometry"] = shapely_mapping(geom)
         feature["properties"]["level"] = level_name
         features_out.append(feature)
 
@@ -226,6 +287,10 @@ def combine_general_risk(snow_idx, cold_idx, ice_idx, blizzard_idx):
 def main():
     run_time = find_latest_run()
     print(f"Używam przebiegu: {run_time.isoformat()}")
+
+    print("Pobieram granice lądu (Natural Earth)...")
+    land_mask = build_land_mask()
+    print(f"Maska lądu gotowa ({land_mask.geom_type})")
 
     precip_member_grids = []
     snow_member_grids = []
@@ -332,7 +397,7 @@ def main():
                         "wody, mm/24h) - styl CESTOF, nie osobne progi.",
                 "level_grid": precip_level,
                 "median_intensity": precip_median,
-                "areas": grid_to_polygons(lats, lons, precip_level),
+                "areas": grid_to_polygons(lats, lons, precip_level, land_mask),
             },
             "snow_24h_cm": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (grubosc "
@@ -340,7 +405,7 @@ def main():
                         f"{SNOW_TEMP_THRESHOLD_C}C, z przelicznikiem zaleznym od temperatury.",
                 "level_grid": snow_level,
                 "median_intensity": snow_median,
-                "areas": grid_to_polygons(lats, lons, snow_level),
+                "areas": grid_to_polygons(lats, lons, snow_level, land_mask),
             },
             "cold_min_t2m_c": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
@@ -348,7 +413,7 @@ def main():
                         "ciagle minimum).",
                 "level_grid": cold_level,
                 "median_intensity": cold_median,
-                "areas": grid_to_polygons(lats, lons, cold_level),
+                "areas": grid_to_polygons(lats, lons, cold_level, land_mask),
             },
             "ice_freezing_rain": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
@@ -359,7 +424,7 @@ def main():
                         "(0.5 stopnia), interpolowana na nasza siatke.",
                 "level_grid": ice_level,
                 "median_intensity": ice_median,
-                "areas": grid_to_polygons(lats, lons, ice_level),
+                "areas": grid_to_polygons(lats, lons, ice_level, land_mask),
             },
             "blizzard": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
@@ -369,7 +434,7 @@ def main():
                         "sniegu na ziemi w danych - to pomija tzw. ground blizzard.",
                 "level_grid": blizzard_level,
                 "median_intensity": blizzard_median,
-                "areas": grid_to_polygons(lats, lons, blizzard_level),
+                "areas": grid_to_polygons(lats, lons, blizzard_level, land_mask),
             },
             "general_winter_risk": {
                 "note": "Polaczenie SNOW+COLD+ICE+BLIZZARD w jeden wskaznik - NIE prosta suma. "
@@ -377,7 +442,7 @@ def main():
                         "jesli co najmniej DWA hazardy jednoczesnie osiagaja ENHANCED lub wyzej, "
                         "calosc podbijana o jeden poziom.",
                 "level_grid": general_level,
-                "areas": grid_to_polygons(lats, lons, general_level),
+                "areas": grid_to_polygons(lats, lons, general_level, land_mask),
             },
         },
     }
