@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Zainstaluj biblioteki
-        run: pip install herbie-data matplotlib geojsoncontour
+        run: pip install herbie-data matplotlib geojsoncontour scipy
 
       - name: Wygeneruj swwf.json
         run: python generate_swwf.py
