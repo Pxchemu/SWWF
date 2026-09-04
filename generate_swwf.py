@@ -56,12 +56,16 @@ LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 # żeby nie kolorować morza (Bałtyk itd.) tam gdzie opad/śnieg nas nie interesuje
 LAND_GEOJSON_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson"
 
-# o ile zagęszczamy siatkę przed konturowaniem, żeby granice polygonów były gładkie,
-# nie kanciaste (jak dotychczas, bezpośrednio z siatki 0.25°)
+# o ile zagęszczamy CIĄGŁE wielkości (mediana, prawdopodobieństwo) przed klasyfikacją
+# na poziomy zagrożenia — wygładzamy dane WEJŚCIOWE, nie już-skategoryzowany wynik,
+# żeby granice miały sens fizyczny, a nie tylko wizualny
 POLYGON_SMOOTHING_FACTOR = 4
 # minimalna powierzchnia polygonu (w stopniach²), poniżej której traktujemy go jako
 # artefakt interpolacji/szum na granicy, nie realny obszar zagrożenia
 MIN_POLYGON_AREA_DEG2 = 0.03
+# tolerancja upraszczania geometrii (stopnie) — usuwa zbędne, mikroskopijne punkty
+# na granicy polygonu bez widocznej zmiany kształtu, zmniejsza rozmiar pliku
+POLYGON_SIMPLIFY_TOLERANCE = 0.01
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
 MEMBERS = list(range(1, 31))
@@ -164,23 +168,22 @@ def build_land_mask():
 
 
 def grid_to_polygons(lats, lons, level_idx_grid, land_mask=None):
-    """Zamienia siatkę indeksów poziomu zagrożenia (0-5) na gotowe polygony GeoJSON:
-    1) zagęszcza siatkę przed konturowaniem (gładkie granice zamiast kanciastych),
-    2) przycina wynik do lądu (nie kolorujemy morza),
-    3) odrzuca drobne, prawdopodobnie fałszywe skrawki na granicach."""
-    arr = np.array(level_idx_grid, dtype=float)
+    """Zamienia JUŻ WYGŁADZONĄ siatkę indeksów poziomu zagrożenia (0-5) na gotowe
+    polygony GeoJSON: 1) kontury, 2) przycięcie do lądu (nie kolorujemy morza),
+    3) uproszczenie geometrii (mniej zbędnych punktów, mniejszy plik),
+    4) odrzucenie drobnych, prawdopodobnie fałszywych skrawków na granicach.
 
-    # --- 1) wygładzanie: zagęszczamy siatkę interpolacją, zanim policzymy kontury ---
-    arr_smooth = ndimage_zoom(arr, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest")
-    arr_smooth = np.clip(arr_smooth, 0, len(MATRIX_LEVEL_NAMES) - 1)
-    lats_smooth = np.linspace(lats[0], lats[-1], arr_smooth.shape[0])
-    lons_smooth = np.linspace(lons[0], lons[-1], arr_smooth.shape[1])
+    UWAGA: samo wygładzanie dzieje się WCZEŚNIEJ, w classify_hazard() — na ciągłych
+    wielkościach (mediana, prawdopodobieństwo) przed klasyfikacją na poziomy, nie tutaj
+    na już-skategoryzowanym wyniku (to dawało granice ładne wizualnie, ale bez sensu
+    fizycznego — uśrednianie samych kategorii SLIGHT/MODERATE nie ma dobrej interpretacji)."""
+    arr = np.array(level_idx_grid, dtype=float)
 
     fig = plt.figure()
     ax = fig.add_subplot(111)
     try:
         bounds = [i - 0.5 for i in range(len(MATRIX_LEVEL_NAMES) + 1)]  # -0.5 .. 5.5
-        cs = ax.contourf(lons_smooth, lats_smooth, arr_smooth, levels=bounds, colors=MATRIX_LEVEL_COLORS)
+        cs = ax.contourf(lons, lats, arr, levels=bounds, colors=MATRIX_LEVEL_COLORS)
         geojson_str = geojsoncontour.contourf_to_geojson(contourf=cs, ndigits=3, fill_opacity=0.5)
     finally:
         plt.close(fig)
@@ -200,13 +203,18 @@ def grid_to_polygons(lats, lons, level_idx_grid, land_mask=None):
 
         geom = shapely_shape(feature["geometry"])
 
-        # --- 2) przycinamy do lądu (nie kolorujemy morza) ---
+        # --- przycinamy do lądu (nie kolorujemy morza) ---
         if land_mask is not None:
             geom = geom.intersection(land_mask)
             if geom.is_empty:
                 continue
 
-        # --- 3) odrzucamy drobne skrawki (artefakty interpolacji na granicach) ---
+        # --- upraszczamy geometrię: mniej zbędnych punktów, ten sam kształt ---
+        geom = geom.simplify(POLYGON_SIMPLIFY_TOLERANCE, preserve_topology=True)
+        if geom.is_empty:
+            continue
+
+        # --- odrzucamy drobne skrawki (artefakty interpolacji na granicach) ---
         if geom.geom_type == "MultiPolygon":
             kept = [g for g in geom.geoms if g.area >= MIN_POLYGON_AREA_DEG2]
             if not kept:
@@ -222,7 +230,35 @@ def grid_to_polygons(lats, lons, level_idx_grid, land_mask=None):
     return {"type": "FeatureCollection", "features": features_out}
 
 
-def classify_hazard(stacked, intensity_bins, direction="ge"):
+def _bucket_by_bins(values, bin_edges):
+    """Przydziela każdą wartość do jednego z 6 przedziałów (0-5) wg rosnących granic
+    (7 elementów), albo -1 gdy poniżej najniższej granicy."""
+    idx = np.full(values.shape, -1, dtype=int)
+    for i in range(6):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        mask = (values >= lo) if i == 5 else ((values >= lo) & (values < hi))
+        idx[mask] = i
+    return idx
+
+
+def _bucket_prob(prob):
+    idx = np.zeros(prob.shape, dtype=int)
+    for i in range(6):
+        lo, hi = MATRIX_PROB_BINS[i], MATRIX_PROB_BINS[i + 1]
+        mask = (prob >= lo) if i == 5 else ((prob >= lo) & (prob < hi))
+        idx[mask] = i
+    return idx
+
+
+def _apply_matrix(intensity_idx, prob_idx):
+    matrix_np = np.array(CESTOF_MATRIX)
+    level_idx = np.zeros(intensity_idx.shape, dtype=int)
+    has_signal = intensity_idx >= 0
+    level_idx[has_signal] = matrix_np[prob_idx[has_signal], intensity_idx[has_signal]]
+    return level_idx
+
+
+def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
     """Serce systemu CESTOF: łączy prawdopodobieństwo i intensywność w jeden poziom.
 
     stacked: xr.DataArray (member, lat, lon)
@@ -230,10 +266,17 @@ def classify_hazard(stacked, intensity_bins, direction="ge"):
     direction="ge": więcej/wyżej = gorzej (opad, śnieg, ICE, BLIZZARD)
     direction="le": mniej/niżej = gorzej (mróz — ujemne temperatury)
 
-    Zwraca: (level_idx_grid, median_grid) jako zwykłe listy list (do zapisu w JSON).
+    WAŻNE: wygładzanie (zagęszczanie siatki) dzieje się TUTAJ, na CIĄGŁYCH wielkościach
+    (mediana, prawdopodobieństwo) — PRZED klasyfikacją na poziomy CESTOF, nie po niej.
+    Uśrednianie już-skategoryzowanych poziomów (SLIGHT/MODERATE/...) nie miałoby
+    dobrej interpretacji fizycznej — to tylko liczby porządkowe, nie ciągła skala.
+
+    Zwraca:
+      level_idx_native (lista list) — do zapisu w JSON / podglądu surowej siatki
+      median_native (lista list) — zdiagnozowana intensywność, do JSON
+      level_idx_smooth, lats_smooth, lons_smooth — wygładzona wersja, do polygonów
     """
     values = np.asarray(stacked.values)  # (member, lat, lon)
-    n_lat, n_lon = values.shape[1], values.shape[2]
 
     if direction == "le":
         work = -values
@@ -242,34 +285,26 @@ def classify_hazard(stacked, intensity_bins, direction="ge"):
         work = values
         bins = list(intensity_bins)
 
-    median = np.median(work, axis=0)  # (lat, lon)
+    median = np.median(work, axis=0)  # (lat, lon), w przestrzeni "work" (nie realnych jednostek)
 
-    # przedział intensywności zdiagnozowanej mediany: 0-5, albo -1 gdy poniżej najniższego progu
-    intensity_idx = np.full((n_lat, n_lon), -1, dtype=int)
-    for i in range(6):
-        lo, hi = bins[i], bins[i + 1]
-        mask = (median >= lo) if i == 5 else ((median >= lo) & (median < hi))
-        intensity_idx[mask] = i
-
-    # próg do porównania per punkt: dolna granica ZDIAGNOZOWANEGO przedziału (0 tam gdzie -1,
-    # i tak nieużywane, bo tam wynik i tak będzie NONE)
+    intensity_idx = _bucket_by_bins(median, bins)
     lower_bound_per_point = np.array(bins)[np.clip(intensity_idx, 0, 5)]
     prob = (work >= lower_bound_per_point[None, :, :]).mean(axis=0) * 100
 
-    prob_idx = np.zeros((n_lat, n_lon), dtype=int)
-    for i in range(6):
-        lo, hi = MATRIX_PROB_BINS[i], MATRIX_PROB_BINS[i + 1]
-        mask = (prob >= lo) if i == 5 else ((prob >= lo) & (prob < hi))
-        prob_idx[mask] = i
-
-    level_idx = np.zeros((n_lat, n_lon), dtype=int)
-    matrix_np = np.array(CESTOF_MATRIX)
-    has_signal = intensity_idx >= 0
-    level_idx[has_signal] = matrix_np[prob_idx[has_signal], intensity_idx[has_signal]]
-    # tam gdzie intensity_idx == -1 zostaje 0 (NONE) — nic nie robimy, już zainicjalizowane zerami
-
+    # --- wersja natywna (do JSON / podglądu surowej siatki) ---
+    level_idx_native = _apply_matrix(intensity_idx, _bucket_prob(prob))
     real_median = np.median(values, axis=0)
-    return level_idx.tolist(), np.round(real_median, 1).tolist()
+
+    # --- wygładzanie: zagęszczamy medianę i prawdopodobieństwo, DOPIERO PÓŹNIEJ klasyfikujemy ---
+    median_smooth = ndimage_zoom(median, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest")
+    prob_smooth = np.clip(ndimage_zoom(prob, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest"), 0, 100)
+    lats_smooth = np.linspace(lats[0], lats[-1], median_smooth.shape[0])
+    lons_smooth = np.linspace(lons[0], lons[-1], median_smooth.shape[1])
+
+    intensity_idx_smooth = _bucket_by_bins(median_smooth, bins)
+    level_idx_smooth = _apply_matrix(intensity_idx_smooth, _bucket_prob(prob_smooth))
+
+    return level_idx_native.tolist(), np.round(real_median, 1).tolist(), level_idx_smooth, lats_smooth, lons_smooth
 
 
 def combine_general_risk(snow_idx, cold_idx, ice_idx, blizzard_idx):
@@ -370,13 +405,16 @@ def main():
     stacked_icing_precip = xr.concat(icing_precip_member_grids, dim="member")
     stacked_blizzard_gust = xr.concat(blizzard_gust_member_grids, dim="member")
 
-    precip_level, precip_median = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM)
-    snow_level, snow_median = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM)
-    cold_level, cold_median = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, direction="le")
-    ice_level, ice_median = classify_hazard(stacked_icing_precip, ICE_INTENSITY_BINS_MM)
-    blizzard_level, blizzard_median = classify_hazard(stacked_blizzard_gust, BLIZZARD_INTENSITY_BINS_MS)
+    precip_level, precip_median, precip_smooth, lats_s, lons_s = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM, lats, lons)
+    snow_level, snow_median, snow_smooth, _, _ = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM, lats, lons)
+    cold_level, cold_median, cold_smooth, _, _ = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, lats, lons, direction="le")
+    ice_level, ice_median, ice_smooth, _, _ = classify_hazard(stacked_icing_precip, ICE_INTENSITY_BINS_MM, lats, lons)
+    blizzard_level, blizzard_median, blizzard_smooth, _, _ = classify_hazard(stacked_blizzard_gust, BLIZZARD_INTENSITY_BINS_MS, lats, lons)
 
+    # combine_general_risk liczymy na WYGŁADZONYCH siatkach (ten sam kształt dla
+    # wszystkich czterech, bo ten sam współczynnik zagęszczenia i ta sama siatka natywna)
     general_level = combine_general_risk(snow_level, cold_level, ice_level, blizzard_level)
+    general_smooth = combine_general_risk(snow_smooth, cold_smooth, ice_smooth, blizzard_smooth)
 
     valid_from = run_time
     valid_to = run_time + timedelta(hours=24)
@@ -397,7 +435,7 @@ def main():
                         "wody, mm/24h) - styl CESTOF, nie osobne progi.",
                 "level_grid": precip_level,
                 "median_intensity": precip_median,
-                "areas": grid_to_polygons(lats, lons, precip_level, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, precip_smooth, land_mask),
             },
             "snow_24h_cm": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (grubosc "
@@ -405,7 +443,7 @@ def main():
                         f"{SNOW_TEMP_THRESHOLD_C}C, z przelicznikiem zaleznym od temperatury.",
                 "level_grid": snow_level,
                 "median_intensity": snow_median,
-                "areas": grid_to_polygons(lats, lons, snow_level, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, snow_smooth, land_mask),
             },
             "cold_min_t2m_c": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
@@ -413,7 +451,7 @@ def main():
                         "ciagle minimum).",
                 "level_grid": cold_level,
                 "median_intensity": cold_median,
-                "areas": grid_to_polygons(lats, lons, cold_level, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, land_mask),
             },
             "ice_freezing_rain": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
@@ -424,7 +462,7 @@ def main():
                         "(0.5 stopnia), interpolowana na nasza siatke.",
                 "level_grid": ice_level,
                 "median_intensity": ice_median,
-                "areas": grid_to_polygons(lats, lons, ice_level, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, ice_smooth, land_mask),
             },
             "blizzard": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
@@ -434,7 +472,7 @@ def main():
                         "sniegu na ziemi w danych - to pomija tzw. ground blizzard.",
                 "level_grid": blizzard_level,
                 "median_intensity": blizzard_median,
-                "areas": grid_to_polygons(lats, lons, blizzard_level, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, blizzard_smooth, land_mask),
             },
             "general_winter_risk": {
                 "note": "Polaczenie SNOW+COLD+ICE+BLIZZARD w jeden wskaznik - NIE prosta suma. "
@@ -442,7 +480,7 @@ def main():
                         "jesli co najmniej DWA hazardy jednoczesnie osiagaja ENHANCED lub wyzej, "
                         "calosc podbijana o jeden poziom.",
                 "level_grid": general_level,
-                "areas": grid_to_polygons(lats, lons, general_level, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, general_smooth, land_mask),
             },
         },
     }
