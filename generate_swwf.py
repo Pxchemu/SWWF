@@ -45,16 +45,19 @@ import matplotlib.pyplot as plt
 import geojsoncontour
 import requests
 from scipy.ndimage import zoom as ndimage_zoom
-from shapely.geometry import shape as shapely_shape, box as shapely_box, mapping as shapely_mapping
+from shapely.geometry import shape as shapely_shape, box as shapely_box, mapping as shapely_mapping, Polygon as ShapelyPolygon, MultiPolygon as ShapelyMultiPolygon
 from shapely.ops import unary_union
 
 LAT_MIN, LAT_MAX = 46.8, 55.5   # Niemcy/Polska/Czechy/Słowacja
 LON_MIN, LON_MAX = 5.5, 24.5
 LON_MIN_360, LON_MAX_360 = LON_MIN % 360, LON_MAX % 360
 
-# granice lądu (Natural Earth, domena publiczna) — do przycinania hazardów tylko do lądu,
-# żeby nie kolorować morza (Bałtyk itd.) tam gdzie opad/śnieg nas nie interesuje
-LAND_GEOJSON_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson"
+# granice PAŃSTW (Natural Earth 10m — dokładniejsza siatka niż wcześniejsze 50m; domena
+# publiczna), do przycinania hazardów TYLKO do Niemiec/Polski/Czech/Słowacji — to od razu
+# wycina i morze (Bałtyk), i sąsiednie kraje (Austria, Ukraina itd.) w jednym kroku,
+# więc osobna maska lądu nie jest już potrzebna
+COUNTRIES_GEOJSON_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson"
+TARGET_COUNTRY_ISO3 = {"DEU", "POL", "CZE", "SVK"}
 
 # o ile zagęszczamy CIĄGŁE wielkości (mediana, prawdopodobieństwo) przed klasyfikacją
 # na poziomy zagrożenia — wygładzamy dane WEJŚCIOWE, nie już-skategoryzowany wynik,
@@ -66,6 +69,9 @@ MIN_POLYGON_AREA_DEG2 = 0.03
 # tolerancja upraszczania geometrii (stopnie) — usuwa zbędne, mikroskopijne punkty
 # na granicy polygonu bez widocznej zmiany kształtu, zmniejsza rozmiar pliku
 POLYGON_SIMPLIFY_TOLERANCE = 0.01
+# liczba iteracji wygładzania Chaikina (ścinanie narożników) — czysto kosmetyczne,
+# zaokrągla kanciaste przejścia na bardziej "organiczne", bliżej ręcznie rysowanych map
+CHAIKIN_ITERATIONS = 2
 
 WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
 MEMBERS = list(range(1, 31))
@@ -154,29 +160,87 @@ def fetch_t850_interpolated(run_time, member, fxx, target_lat, target_lon):
     return t850.interp(latitude=target_lat, longitude=target_lon)
 
 
-def build_land_mask():
-    """Pobiera granice lądu (Natural Earth) i buduje jedną geometrię (unię) tylko z tych
-    fragmentów, które faktycznie przecinają nasz region — reszta świata nas nie interesuje,
-    a to znacznie przyspiesza późniejsze przycinanie."""
-    resp = requests.get(LAND_GEOJSON_URL, timeout=30)
+def build_country_mask():
+    """Pobiera granice państw (Natural Earth) i buduje jedną geometrię (unię) tylko
+    z Niemiec/Polski/Czech/Słowacji — to jednocześnie wycina morze (Bałtyk) i sąsiednie
+    kraje (Austria, Ukraina itd.), bez potrzeby osobnej maski lądu."""
+    resp = requests.get(COUNTRIES_GEOJSON_URL, timeout=60)
     resp.raise_for_status()
     data = resp.json()
-    region_box = shapely_box(LON_MIN, LAT_MIN, LON_MAX, LAT_MAX)
     relevant = [shapely_shape(f["geometry"]) for f in data["features"]
-                if shapely_shape(f["geometry"]).intersects(region_box)]
+                if f["properties"].get("ISO_A3") in TARGET_COUNTRY_ISO3]
     return unary_union(relevant)
 
 
-def grid_to_polygons(lats, lons, level_idx_grid, land_mask=None):
-    """Zamienia JUŻ WYGŁADZONĄ siatkę indeksów poziomu zagrożenia (0-5) na gotowe
-    polygony GeoJSON: 1) kontury, 2) przycięcie do lądu (nie kolorujemy morza),
-    3) uproszczenie geometrii (mniej zbędnych punktów, mniejszy plik),
-    4) odrzucenie drobnych, prawdopodobnie fałszywych skrawków na granicach.
+def _chaikin_smooth_coords(coords, iterations=CHAIKIN_ITERATIONS):
+    """Wygładzanie Chaikina — zaokrągla naroża przez iteracyjne "ścinanie" rogów.
+    Czysto kosmetyczne: nie zmienia danych, tylko sposób rysowania granicy."""
+    pts = list(coords)
+    is_closed = len(pts) > 1 and pts[0] == pts[-1]
+    if is_closed:
+        pts = pts[:-1]
+    for _ in range(iterations):
+        new_pts = []
+        n = len(pts)
+        if n < 3:
+            return coords  # za mało punktów, żeby to miało sens
+        for i in range(n):
+            p0, p1 = pts[i], pts[(i + 1) % n]
+            q = (0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1])
+            r = (0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1])
+            new_pts.extend([q, r])
+        pts = new_pts
+    if is_closed:
+        pts = pts + [pts[0]]
+    return pts
 
-    UWAGA: samo wygładzanie dzieje się WCZEŚNIEJ, w classify_hazard() — na ciągłych
-    wielkościach (mediana, prawdopodobieństwo) przed klasyfikacją na poziomy, nie tutaj
-    na już-skategoryzowanym wyniku (to dawało granice ładne wizualnie, ale bez sensu
-    fizycznego — uśrednianie samych kategorii SLIGHT/MODERATE nie ma dobrej interpretacji)."""
+
+def chaikin_smooth_geometry(geom):
+    """Stosuje wygładzanie Chaikina do zewnętrznej granicy i dziur każdego wielokąta
+    (obsługuje zarówno Polygon jak i MultiPolygon).
+
+    UWAGA: przy bardzo wklęsłych/skomplikowanych kształtach (np. granice państw)
+    samo ścinanie rogów może czasem stworzyć samoprzecinającą się (nieprawidłową)
+    geometrię — naprawiamy to przez buffer(0) (standardowa sztuczka shapely), a jeśli
+    i to zawiedzie, bezpiecznie wracamy do ORYGINALNEGO (niewygładzonego) kształtu
+    dla tego konkretnego wielokąta, zamiast wywalać cały skrypt."""
+    def smooth_one(poly):
+        exterior = _chaikin_smooth_coords(list(poly.exterior.coords))
+        interiors = [_chaikin_smooth_coords(list(ring.coords)) for ring in poly.interiors]
+        candidate = ShapelyPolygon(exterior, interiors)
+        if not candidate.is_valid:
+            candidate = candidate.buffer(0)
+        if candidate.is_empty or not candidate.is_valid:
+            return poly  # bezpieczny fallback: oryginalny, niewygładzony kształt
+        return candidate
+
+    if geom.geom_type == "Polygon":
+        return smooth_one(geom)
+    elif geom.geom_type == "MultiPolygon":
+        smoothed = [smooth_one(p) for p in geom.geoms]
+        # smooth_one może czasem zwrócić MultiPolygon po buffer(0) — spłaszczamy
+        flat = []
+        for g in smoothed:
+            if g.geom_type == "MultiPolygon":
+                flat.extend(g.geoms)
+            else:
+                flat.append(g)
+        return ShapelyMultiPolygon(flat)
+    return geom
+
+
+
+def grid_to_polygons(lats, lons, level_idx_grid, country_mask=None):
+    """Zamienia JUŻ WYGŁADZONĄ siatkę indeksów poziomu zagrożenia (0-5) na gotowe
+    polygony GeoJSON: 1) kontury, 2) przycięcie do Niemiec/Polski/Czech/Słowacji
+    (wycina morze i sąsiednie kraje jednym krokiem), 3) wygładzanie Chaikina
+    (zaokrąglenie narożników — kosmetyczne), 4) uproszczenie geometrii (mniej
+    zbędnych punktów), 5) odrzucenie drobnych, prawdopodobnie fałszywych skrawków.
+
+    UWAGA: samo wygładzanie DANYCH dzieje się WCZEŚNIEJ, w classify_hazard() — na
+    ciągłych wielkościach (mediana, prawdopodobieństwo) przed klasyfikacją na poziomy,
+    nie tutaj na już-skategoryzowanym wyniku. Wygładzanie Chaikina TUTAJ to coś innego —
+    czysto kosmetyczne zaokrąglenie już poprawnie wyznaczonej granicy."""
     arr = np.array(level_idx_grid, dtype=float)
 
     fig = plt.figure()
@@ -203,11 +267,16 @@ def grid_to_polygons(lats, lons, level_idx_grid, land_mask=None):
 
         geom = shapely_shape(feature["geometry"])
 
-        # --- przycinamy do lądu (nie kolorujemy morza) ---
-        if land_mask is not None:
-            geom = geom.intersection(land_mask)
+        # --- przycinamy do Niemiec/Polski/Czech/Słowacji (wycina morze i sąsiadów) ---
+        if country_mask is not None:
+            geom = geom.intersection(country_mask)
             if geom.is_empty:
                 continue
+
+        # --- wygładzanie Chaikina: zaokrąglamy naroża (czysto kosmetyczne) ---
+        geom = chaikin_smooth_geometry(geom)
+        if geom.is_empty:
+            continue
 
         # --- upraszczamy geometrię: mniej zbędnych punktów, ten sam kształt ---
         geom = geom.simplify(POLYGON_SIMPLIFY_TOLERANCE, preserve_topology=True)
@@ -324,8 +393,8 @@ def main():
     print(f"Używam przebiegu: {run_time.isoformat()}")
 
     print("Pobieram granice lądu (Natural Earth)...")
-    land_mask = build_land_mask()
-    print(f"Maska lądu gotowa ({land_mask.geom_type})")
+    country_mask = build_country_mask()
+    print(f"Maska panstw gotowa ({country_mask.geom_type})")
 
     precip_member_grids = []
     snow_member_grids = []
@@ -435,7 +504,7 @@ def main():
                         "wody, mm/24h) - styl CESTOF, nie osobne progi.",
                 "level_grid": precip_level,
                 "median_intensity": precip_median,
-                "areas": grid_to_polygons(lats_s, lons_s, precip_smooth, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, precip_smooth, country_mask),
             },
             "snow_24h_cm": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (grubosc "
@@ -443,7 +512,7 @@ def main():
                         f"{SNOW_TEMP_THRESHOLD_C}C, z przelicznikiem zaleznym od temperatury.",
                 "level_grid": snow_level,
                 "median_intensity": snow_median,
-                "areas": grid_to_polygons(lats_s, lons_s, snow_smooth, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, snow_smooth, country_mask),
             },
             "cold_min_t2m_c": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
@@ -451,7 +520,7 @@ def main():
                         "ciagle minimum).",
                 "level_grid": cold_level,
                 "median_intensity": cold_median,
-                "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
             },
             "ice_freezing_rain": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
@@ -462,7 +531,7 @@ def main():
                         "(0.5 stopnia), interpolowana na nasza siatke.",
                 "level_grid": ice_level,
                 "median_intensity": ice_median,
-                "areas": grid_to_polygons(lats_s, lons_s, ice_smooth, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, ice_smooth, country_mask),
             },
             "blizzard": {
                 "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
@@ -472,7 +541,7 @@ def main():
                         "sniegu na ziemi w danych - to pomija tzw. ground blizzard.",
                 "level_grid": blizzard_level,
                 "median_intensity": blizzard_median,
-                "areas": grid_to_polygons(lats_s, lons_s, blizzard_smooth, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, blizzard_smooth, country_mask),
             },
             "general_winter_risk": {
                 "note": "Polaczenie SNOW+COLD+ICE+BLIZZARD w jeden wskaznik - NIE prosta suma. "
@@ -480,7 +549,7 @@ def main():
                         "jesli co najmniej DWA hazardy jednoczesnie osiagaja ENHANCED lub wyzej, "
                         "calosc podbijana o jeden poziom.",
                 "level_grid": general_level,
-                "areas": grid_to_polygons(lats_s, lons_s, general_smooth, land_mask),
+                "areas": grid_to_polygons(lats_s, lons_s, general_smooth, country_mask),
             },
         },
     }
