@@ -529,11 +529,6 @@ def main():
     if not precip_member_grids[0]:
         raise RuntimeError("Żaden człon się nie udał — przerywam bez zapisu pliku")
 
-
-    stacked_precip = xr.concat(precip_member_grids, dim="member")
-    stacked_snow = xr.concat(snow_member_grids, dim="member")
-    stacked_cold = xr.concat(cold_member_grids, dim="member")
-    stacked_icing_precip = xr.concat(icing_precip_member_grids, dim="member")
     days_out = []
     for day_idx, day_info in enumerate(DAY_WINDOWS):
         stacked_precip = xr.concat(precip_member_grids[day_idx], dim="member")
