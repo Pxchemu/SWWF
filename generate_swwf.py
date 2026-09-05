@@ -51,6 +51,7 @@ artefakty interpolacji, nie realne obszary zagrożenia) — patrz grid_to_polygo
 """
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from herbie import Herbie
 import numpy as np
 import xarray as xr
@@ -89,8 +90,21 @@ POLYGON_SIMPLIFY_TOLERANCE = 0.01
 # zaokrągla kanciaste przejścia na bardziej "organiczne", bliżej ręcznie rysowanych map
 CHAIKIN_ITERATIONS = 2
 
-WINDOWS = [(0, 6), (6, 12), (12, 18), (18, 24)]
+# trzy doby (DAY1/DAY2/DAY3), każda po 4 okna 6-godzinne — DAY1 to 0-24h od
+# najnowszego przebiegu, DAY2 to 24-48h, DAY3 to 48-72h
+DAY_WINDOWS = [
+    {"label": "Dzień 1", "windows": [(0, 6), (6, 12), (12, 18), (18, 24)]},
+    {"label": "Dzień 2", "windows": [(24, 30), (30, 36), (36, 42), (42, 48)]},
+    {"label": "Dzień 3", "windows": [(48, 54), (54, 60), (60, 66), (66, 72)]},
+]
 MEMBERS = list(range(1, 31))
+WARSAW_TZ = ZoneInfo("Europe/Warsaw")
+
+
+def to_warsaw_iso(dt_utc):
+    """Konwertuje datetime (UTC) na czas polski (automatycznie CET/CEST wg pory
+    roku) i zwraca w formacie ISO z offsetem, żeby było jasne z jakiej strefy jest."""
+    return dt_utc.astimezone(WARSAW_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 # BLIZZARD: klasyczna definicja (NWS) — poryw wiatru >=35mph (~15.5 m/s) + słaba
 # widzialność (śnieg unoszony/padający) — teraz naprawdę mierzona (VIS), nie zgadywana
@@ -406,228 +420,236 @@ def main():
     country_mask = build_country_mask()
     print(f"Maska panstw gotowa ({country_mask.geom_type})")
 
-    precip_member_grids = []
-    snow_member_grids = []
-    cold_member_grids = []
-    icing_precip_member_grids = []    # ile opadu spadło w oknach z CFRZR (intensywność ICE)
-    blizzard_gust_member_grids = []   # szczytowy poryw w oknach z zamiecią (intensywność BLIZZARD)
-    squall_cape_member_grids = []     # szczytowe CAPE w oknach ze snow squall (intensywność SQUALLS)
+    # zbieramy osobno dla każdej z trzech dób — precip_member_grids[0] to DAY1, [1] DAY2, [2] DAY3
+    precip_member_grids = [[] for _ in DAY_WINDOWS]
+    snow_member_grids = [[] for _ in DAY_WINDOWS]
+    cold_member_grids = [[] for _ in DAY_WINDOWS]
+    icing_precip_member_grids = [[] for _ in DAY_WINDOWS]
+    blizzard_gust_member_grids = [[] for _ in DAY_WINDOWS]
+    squall_cape_member_grids = [[] for _ in DAY_WINDOWS]
     failed = []
     lats = lons = None
 
     for m in MEMBERS:
         try:
-            precip_total = None
-            snow_total = None
-            min_t2m = None
-            icing_precip_total = None
-            blizzard_max_gust = None
-            squall_max_cape = None
-            for start, end in WINDOWS:
-                fxx = end
+            for day_idx, day_info in enumerate(DAY_WINDOWS):
+                precip_total = None
+                snow_total = None
+                min_t2m = None
+                icing_precip_total = None
+                blizzard_max_gust = None
+                squall_max_cape = None
+                for start, end in day_info["windows"]:
+                    fxx = end
 
-                H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                             member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
-                precip_window = crop_to_region(ds_p["tp"])
-
-                H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                             member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
-                t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15
-
-                # --- SNOW: CPOFP (procent opadu zamarzniętego, z mikrofizyki modelu) ---
-                # zamiast naszego dawnego, sztywnego progu T2m<=1C — płynne przejście,
-                # nie "albo pada śnieg, albo nie"
-                H_cpofp = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                    H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                  member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_cpofp = H_cpofp.xarray(":CPOFP:surface:", remove_grib=True)
-                cpofp_window = crop_to_region(ds_cpofp[list(ds_cpofp.data_vars)[0]])
-                frozen_fraction = xr.where(cpofp_window >= 0, cpofp_window / 100.0, 0.0)
-                frozen_fraction = xr.where(frozen_fraction > 1, 1.0, frozen_fraction)
-                ratio = snow_density_ratio(t2m_window_c)
-                snow_window_cm = precip_window * frozen_fraction / 10.0 * ratio
+                    ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
+                    precip_window = crop_to_region(ds_p["tp"])
 
-                precip_total = precip_window if precip_total is None else precip_total + precip_window
-                snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
-                min_t2m = t2m_window_c if min_t2m is None else xr.where(t2m_window_c < min_t2m, t2m_window_c, min_t2m)
-
-                # --- ICE: CFRZR (kategoryczna flaga marznącego deszczu WPROST z modelu) ---
-                # zastępuje nasz dawny, dwupoziomowy test T2m/T850 — model sam analizuje
-                # cały profil pionowy, nie tylko dwa punkty (naprawia ograniczenie z sekcji 9
-                # planu), więc T850 i osobne pobieranie atmos.5 nie są już potrzebne
-                H_cfrzr = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                    H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                  member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_cfrzr = H_cfrzr.xarray(":CFRZR:surface:", remove_grib=True)
-                cfrzr_window = crop_to_region(ds_cfrzr[list(ds_cfrzr.data_vars)[0]])
-                icing_precip_window = xr.where(cfrzr_window >= 0.5, precip_window, 0.0)
-                icing_precip_total = icing_precip_window if icing_precip_total is None \
-                    else icing_precip_total + icing_precip_window
+                    ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
+                    t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15
 
-                # --- BLIZZARD: GUST + VIS (widzialność — prawdziwa definicja zamieci) ---
-                # + śnieg ŚWIEŻY LUB JUŻ LEŻĄCY (SNOD) — to drugie naprawia "ground blizzard"
-                # (wiatr wzbijający stary śnieg bez nowych opadów), czego wcześniej nie mieliśmy
-                H_g = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                             member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_g = H_g.xarray(":GUST:surface:", remove_grib=True)
-                gust_window = crop_to_region(ds_g[list(ds_g.data_vars)[0]])
+                    # --- SNOW: CPOFP (procent opadu zamarzniętego, z mikrofizyki modelu) ---
+                    H_cpofp = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                     member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_cpofp = H_cpofp.xarray(":CPOFP:surface:", remove_grib=True)
+                    cpofp_window = crop_to_region(ds_cpofp[list(ds_cpofp.data_vars)[0]])
+                    frozen_fraction = xr.where(cpofp_window >= 0, cpofp_window / 100.0, 0.0)
+                    frozen_fraction = xr.where(frozen_fraction > 1, 1.0, frozen_fraction)
+                    ratio = snow_density_ratio(t2m_window_c)
+                    snow_window_cm = precip_window * frozen_fraction / 10.0 * ratio
 
-                H_vis = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                               member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_vis = H_vis.xarray(":VIS:surface:", remove_grib=True)
-                vis_window = crop_to_region(ds_vis[list(ds_vis.data_vars)[0]])  # metry
+                    precip_total = precip_window if precip_total is None else precip_total + precip_window
+                    snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
+                    min_t2m = t2m_window_c if min_t2m is None else xr.where(t2m_window_c < min_t2m, t2m_window_c, min_t2m)
 
-                H_snod = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                                member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_snod = H_snod.xarray(":SNOD:surface:", remove_grib=True)
-                snod_window_cm = crop_to_region(ds_snod[list(ds_snod.data_vars)[0]]) * 100.0  # m -> cm
+                    # --- ICE: CFRZR (kategoryczna flaga marznącego deszczu WPROST z modelu) ---
+                    H_cfrzr = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                     member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_cfrzr = H_cfrzr.xarray(":CFRZR:surface:", remove_grib=True)
+                    cfrzr_window = crop_to_region(ds_cfrzr[list(ds_cfrzr.data_vars)[0]])
+                    icing_precip_window = xr.where(cfrzr_window >= 0.5, precip_window, 0.0)
+                    icing_precip_total = icing_precip_window if icing_precip_total is None \
+                        else icing_precip_total + icing_precip_window
 
-                snow_available = (snow_window_cm >= MIN_FRESH_SNOW_FOR_BLIZZARD_CM) | \
-                                  (snod_window_cm >= MIN_SNOW_DEPTH_FOR_GROUND_BLIZZARD_CM)
-                blizzard_condition = (gust_window >= BLIZZARD_GUST_THRESHOLD_MS) & \
-                                     (vis_window <= BLIZZARD_VIS_THRESHOLD_M) & \
-                                     snow_available
-                gust_during_blizzard = xr.where(blizzard_condition, gust_window, 0.0)
-                blizzard_max_gust = gust_during_blizzard if blizzard_max_gust is None else \
-                    xr.where(gust_during_blizzard > blizzard_max_gust, gust_during_blizzard, blizzard_max_gust)
+                    # --- BLIZZARD: GUST + VIS + śnieg ŚWIEŻY LUB JUŻ LEŻĄCY (SNOD) ---
+                    H_g = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                 member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_g = H_g.xarray(":GUST:surface:", remove_grib=True)
+                    gust_window = crop_to_region(ds_g[list(ds_g.data_vars)[0]])
 
-                # --- SNOW SQUALLS (nowy hazard): CAPE + aktywny opad śniegu w tym samym oknie ---
-                # nagłe, gwałtowne opady śniegu o niemal burzowym charakterze — czego
-                # wcześniej w ogóle nie wykrywaliśmy
-                H_cape = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                                member=m, fxx=fxx, priority=["aws"], verbose=False)
-                ds_cape = H_cape.xarray(":CAPE:surface:", remove_grib=True)
-                cape_window = crop_to_region(ds_cape[list(ds_cape.data_vars)[0]])
-                squall_condition = (cape_window >= SQUALL_CAPE_THRESHOLD_JKG) & \
-                                   (frozen_fraction >= 0.5) & \
-                                   (precip_window >= MIN_PRECIP_FOR_SQUALL_MM)
-                cape_during_squall = xr.where(squall_condition, cape_window, 0.0)
-                squall_max_cape = cape_during_squall if squall_max_cape is None else \
-                    xr.where(cape_during_squall > squall_max_cape, cape_during_squall, squall_max_cape)
+                    H_vis = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                   member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_vis = H_vis.xarray(":VIS:surface:", remove_grib=True)
+                    vis_window = crop_to_region(ds_vis[list(ds_vis.data_vars)[0]])  # metry
 
-            if lats is None:
-                lats = [round(float(x), 3) for x in precip_total.latitude.values]
-                lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
-            precip_member_grids.append(precip_total)
-            snow_member_grids.append(snow_total)
-            cold_member_grids.append(min_t2m)
-            icing_precip_member_grids.append(icing_precip_total)
-            blizzard_gust_member_grids.append(blizzard_max_gust)
-            squall_cape_member_grids.append(squall_max_cape)
+                    H_snod = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                    member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_snod = H_snod.xarray(":SNOD:surface:", remove_grib=True)
+                    snod_window_cm = crop_to_region(ds_snod[list(ds_snod.data_vars)[0]]) * 100.0  # m -> cm
+
+                    snow_available = (snow_window_cm >= MIN_FRESH_SNOW_FOR_BLIZZARD_CM) | \
+                                      (snod_window_cm >= MIN_SNOW_DEPTH_FOR_GROUND_BLIZZARD_CM)
+                    blizzard_condition = (gust_window >= BLIZZARD_GUST_THRESHOLD_MS) & \
+                                         (vis_window <= BLIZZARD_VIS_THRESHOLD_M) & \
+                                         snow_available
+                    gust_during_blizzard = xr.where(blizzard_condition, gust_window, 0.0)
+                    blizzard_max_gust = gust_during_blizzard if blizzard_max_gust is None else \
+                        xr.where(gust_during_blizzard > blizzard_max_gust, gust_during_blizzard, blizzard_max_gust)
+
+                    # --- SNOW SQUALLS: CAPE + aktywny, w większości zamarznięty opad ---
+                    H_cape = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                    member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_cape = H_cape.xarray(":CAPE:surface:", remove_grib=True)
+                    cape_window = crop_to_region(ds_cape[list(ds_cape.data_vars)[0]])
+                    squall_condition = (cape_window >= SQUALL_CAPE_THRESHOLD_JKG) & \
+                                       (frozen_fraction >= 0.5) & \
+                                       (precip_window >= MIN_PRECIP_FOR_SQUALL_MM)
+                    cape_during_squall = xr.where(squall_condition, cape_window, 0.0)
+                    squall_max_cape = cape_during_squall if squall_max_cape is None else \
+                        xr.where(cape_during_squall > squall_max_cape, cape_during_squall, squall_max_cape)
+
+                if lats is None:
+                    lats = [round(float(x), 3) for x in precip_total.latitude.values]
+                    lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
+                precip_member_grids[day_idx].append(precip_total)
+                snow_member_grids[day_idx].append(snow_total)
+                cold_member_grids[day_idx].append(min_t2m)
+                icing_precip_member_grids[day_idx].append(icing_precip_total)
+                blizzard_gust_member_grids[day_idx].append(blizzard_max_gust)
+                squall_cape_member_grids[day_idx].append(squall_max_cape)
             print(f"  człon {m:>2}: OK")
         except Exception as e:
             failed.append(m)
             print(f"  człon {m:>2}: BŁĄD ({e})")
 
-    if not precip_member_grids:
+    if not precip_member_grids[0]:
         raise RuntimeError("Żaden człon się nie udał — przerywam bez zapisu pliku")
+
 
     stacked_precip = xr.concat(precip_member_grids, dim="member")
     stacked_snow = xr.concat(snow_member_grids, dim="member")
     stacked_cold = xr.concat(cold_member_grids, dim="member")
     stacked_icing_precip = xr.concat(icing_precip_member_grids, dim="member")
-    stacked_blizzard_gust = xr.concat(blizzard_gust_member_grids, dim="member")
-    stacked_squall_cape = xr.concat(squall_cape_member_grids, dim="member")
+    days_out = []
+    for day_idx, day_info in enumerate(DAY_WINDOWS):
+        stacked_precip = xr.concat(precip_member_grids[day_idx], dim="member")
+        stacked_snow = xr.concat(snow_member_grids[day_idx], dim="member")
+        stacked_cold = xr.concat(cold_member_grids[day_idx], dim="member")
+        stacked_icing_precip = xr.concat(icing_precip_member_grids[day_idx], dim="member")
+        stacked_blizzard_gust = xr.concat(blizzard_gust_member_grids[day_idx], dim="member")
+        stacked_squall_cape = xr.concat(squall_cape_member_grids[day_idx], dim="member")
 
-    precip_level, precip_median, precip_smooth, lats_s, lons_s = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM, lats, lons)
-    snow_level, snow_median, snow_smooth, _, _ = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM, lats, lons)
-    cold_level, cold_median, cold_smooth, _, _ = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, lats, lons, direction="le")
-    ice_level, ice_median, ice_smooth, _, _ = classify_hazard(stacked_icing_precip, ICE_INTENSITY_BINS_MM, lats, lons)
-    blizzard_level, blizzard_median, blizzard_smooth, _, _ = classify_hazard(stacked_blizzard_gust, BLIZZARD_INTENSITY_BINS_MS, lats, lons)
-    squall_level, squall_median, squall_smooth, _, _ = classify_hazard(stacked_squall_cape, SQUALL_INTENSITY_BINS_JKG, lats, lons)
+        precip_level, precip_median, precip_smooth, lats_s, lons_s = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM, lats, lons)
+        snow_level, snow_median, snow_smooth, _, _ = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM, lats, lons)
+        cold_level, cold_median, cold_smooth, _, _ = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, lats, lons, direction="le")
+        ice_level, ice_median, ice_smooth, _, _ = classify_hazard(stacked_icing_precip, ICE_INTENSITY_BINS_MM, lats, lons)
+        blizzard_level, blizzard_median, blizzard_smooth, _, _ = classify_hazard(stacked_blizzard_gust, BLIZZARD_INTENSITY_BINS_MS, lats, lons)
+        squall_level, squall_median, squall_smooth, _, _ = classify_hazard(stacked_squall_cape, SQUALL_INTENSITY_BINS_JKG, lats, lons)
 
-    # combine_general_risk liczymy na WYGŁADZONYCH siatkach (ten sam kształt dla
-    # wszystkich czterech, bo ten sam współczynnik zagęszczenia i ta sama siatka natywna)
-    general_level = combine_general_risk(snow_level, cold_level, ice_level, blizzard_level, squall_level)
-    general_smooth = combine_general_risk(snow_smooth, cold_smooth, ice_smooth, blizzard_smooth, squall_smooth)
+        # combine_general_risk liczymy na WYGŁADZONYCH siatkach (ten sam kształt dla
+        # wszystkich pięciu, bo ten sam współczynnik zagęszczenia i ta sama siatka natywna)
+        general_level = combine_general_risk(snow_level, cold_level, ice_level, blizzard_level, squall_level)
+        general_smooth = combine_general_risk(snow_smooth, cold_smooth, ice_smooth, blizzard_smooth, squall_smooth)
 
-    valid_from = run_time
-    valid_to = run_time + timedelta(hours=24)
+        day_start_h, day_end_h = day_info["windows"][0][0], day_info["windows"][-1][1]
+        valid_from = run_time + timedelta(hours=day_start_h)
+        valid_to = run_time + timedelta(hours=day_end_h)
+
+        days_out.append({
+            "label": day_info["label"],
+            "valid_from": to_warsaw_iso(valid_from),
+            "valid_to": to_warsaw_iso(valid_to),
+            "hazards": {
+                "precip_24h_mm": {
+                    "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (opad "
+                            "wody, mm/24h) - styl CESTOF, nie osobne progi.",
+                    "level_grid": precip_level,
+                    "median_intensity": precip_median,
+                    "areas": grid_to_polygons(lats_s, lons_s, precip_smooth, country_mask),
+                },
+                "snow_24h_cm": {
+                    "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (grubosc "
+                            "sniegu, cm/24h). Snieg liczony jako CPOFP (procent opadu zamarznietego, "
+                            "z mikrofizyki modelu) razy przelicznik gestosci zalezny od temperatury - "
+                            "plynne przejscie, nie sztywny prog temperatury jak wczesniej.",
+                    "level_grid": snow_level,
+                    "median_intensity": snow_median,
+                    "areas": grid_to_polygons(lats_s, lons_s, snow_smooth, country_mask),
+                },
+                "cold_min_t2m_c": {
+                    "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
+                            "T2m z 4 odczytow co 6h w ciagu doby - przyblizenie, nie prawdziwe "
+                            "ciagle minimum).",
+                    "level_grid": cold_level,
+                    "median_intensity": cold_median,
+                    "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
+                },
+                "ice_freezing_rain": {
+                    "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
+                            "Intensywnosc = suma opadu (mm) w oknach, gdzie CFRZR (kategoryczna "
+                            "flaga marznacego deszczu WPROST z modelu) wskazala marznacy deszcz - "
+                            "model sam analizuje caly profil pionowy, nie tylko dwa punkty jak "
+                            "nasz dawny test T2m/T850.",
+                    "level_grid": ice_level,
+                    "median_intensity": ice_median,
+                    "areas": grid_to_polygons(lats_s, lons_s, ice_smooth, country_mask),
+                },
+                "blizzard": {
+                    "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
+                            "Intensywnosc = szczytowy poryw wiatru (m/s, GUST) w oknach gdzie "
+                            f"jednoczesnie GUST >= {BLIZZARD_GUST_THRESHOLD_MS} m/s, widzialnosc "
+                            f"(VIS) <= {BLIZZARD_VIS_THRESHOLD_M}m, i snieg ŚWIEŻY "
+                            f"(>= {MIN_FRESH_SNOW_FOR_BLIZZARD_CM}cm) LUB JUZ LEZACY na ziemi "
+                            f"(SNOD >= {MIN_SNOW_DEPTH_FOR_GROUND_BLIZZARD_CM}cm) - to drugie "
+                            "obejmuje tzw. ground blizzard (wiatr wzbijajacy stary snieg bez "
+                            "nowych opadow), czego wczesniej nie wykrywalismy.",
+                    "level_grid": blizzard_level,
+                    "median_intensity": blizzard_median,
+                    "areas": grid_to_polygons(lats_s, lons_s, blizzard_smooth, country_mask),
+                },
+                "snow_squalls": {
+                    "note": "NOWY hazard - poziom zagrozenia z macierzy prawdopodobienstwo x "
+                            "intensywnosc. Nagle, gwaltowne opady sniegu o niemal burzowym "
+                            "charakterze. Intensywnosc = szczytowe CAPE (J/kg) w oknach gdzie "
+                            f"jednoczesnie CAPE >= {SQUALL_CAPE_THRESHOLD_JKG} J/kg, opad w "
+                            f"wiekszosci zamarzniety (CPOFP >= 50%) i opad >= "
+                            f"{MIN_PRECIP_FOR_SQUALL_MM}mm.",
+                    "level_grid": squall_level,
+                    "median_intensity": squall_median,
+                    "areas": grid_to_polygons(lats_s, lons_s, squall_smooth, country_mask),
+                },
+                "general_winter_risk": {
+                    "note": "Polaczenie SNOW+COLD+ICE+BLIZZARD+SNOW_SQUALLS w jeden wskaznik - NIE "
+                            "prosta suma. Bazowy poziom to najgrozniejszy z pieciu hazardow w danym "
+                            "punkcie; jesli co najmniej DWA hazardy jednoczesnie osiagaja ENHANCED "
+                            "lub wyzej, calosc podbijana o jeden poziom.",
+                    "level_grid": general_level,
+                    "areas": grid_to_polygons(lats_s, lons_s, general_smooth, country_mask),
+                },
+            },
+        })
+        print(f"  {day_info['label']}: sklasyfikowano i wygenerowano polygony")
 
     result = {
-        "issued": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "model_run": run_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "valid_from": valid_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "valid_to": valid_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "members_used": len(precip_member_grids),
+        "issued": to_warsaw_iso(datetime.now(timezone.utc)),
+        "model_run": to_warsaw_iso(run_time),
+        "members_used": len(precip_member_grids[0]),
         "members_failed": failed,
         "grid": {"lat": lats, "lon": lons},
         "level_names": MATRIX_LEVEL_NAMES,
         "level_colors": MATRIX_LEVEL_COLORS,
-        "hazards": {
-            "precip_24h_mm": {
-                "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (opad "
-                        "wody, mm/24h) - styl CESTOF, nie osobne progi.",
-                "level_grid": precip_level,
-                "median_intensity": precip_median,
-                "areas": grid_to_polygons(lats_s, lons_s, precip_smooth, country_mask),
-            },
-            "snow_24h_cm": {
-                "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (grubosc "
-                        "sniegu, cm/24h). Snieg liczony jako CPOFP (procent opadu zamarznietego, "
-                        "z mikrofizyki modelu) razy przelicznik gestosci zalezny od temperatury - "
-                        "plynne przejscie, nie sztywny prog temperatury jak wczesniej.",
-                "level_grid": snow_level,
-                "median_intensity": snow_median,
-                "areas": grid_to_polygons(lats_s, lons_s, snow_smooth, country_mask),
-            },
-            "cold_min_t2m_c": {
-                "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
-                        "T2m z 4 odczytow co 6h w ciagu doby - przyblizenie, nie prawdziwe "
-                        "ciagle minimum).",
-                "level_grid": cold_level,
-                "median_intensity": cold_median,
-                "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
-            },
-            "ice_freezing_rain": {
-                "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
-                        "Intensywnosc = suma opadu (mm) w oknach, gdzie CFRZR (kategoryczna "
-                        "flaga marznacego deszczu WPROST z modelu) wskazala marznacy deszcz - "
-                        "model sam analizuje caly profil pionowy, nie tylko dwa punkty jak "
-                        "nasz dawny test T2m/T850.",
-                "level_grid": ice_level,
-                "median_intensity": ice_median,
-                "areas": grid_to_polygons(lats_s, lons_s, ice_smooth, country_mask),
-            },
-            "blizzard": {
-                "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc. "
-                        "Intensywnosc = szczytowy poryw wiatru (m/s, GUST) w oknach gdzie "
-                        f"jednoczesnie GUST >= {BLIZZARD_GUST_THRESHOLD_MS} m/s, widzialnosc "
-                        f"(VIS) <= {BLIZZARD_VIS_THRESHOLD_M}m, i snieg ŚWIEŻY "
-                        f"(>= {MIN_FRESH_SNOW_FOR_BLIZZARD_CM}cm) LUB JUZ LEZACY na ziemi "
-                        f"(SNOD >= {MIN_SNOW_DEPTH_FOR_GROUND_BLIZZARD_CM}cm) - to drugie "
-                        "obejmuje tzw. ground blizzard (wiatr wzbijajacy stary snieg bez "
-                        "nowych opadow), czego wczesniej nie wykrywalismy.",
-                "level_grid": blizzard_level,
-                "median_intensity": blizzard_median,
-                "areas": grid_to_polygons(lats_s, lons_s, blizzard_smooth, country_mask),
-            },
-            "snow_squalls": {
-                "note": "NOWY hazard - poziom zagrozenia z macierzy prawdopodobienstwo x "
-                        "intensywnosc. Nagle, gwaltowne opady sniegu o niemal burzowym "
-                        "charakterze. Intensywnosc = szczytowe CAPE (J/kg) w oknach gdzie "
-                        f"jednoczesnie CAPE >= {SQUALL_CAPE_THRESHOLD_JKG} J/kg, opad w "
-                        f"wiekszosci zamarzniety (CPOFP >= 50%) i opad >= "
-                        f"{MIN_PRECIP_FOR_SQUALL_MM}mm.",
-                "level_grid": squall_level,
-                "median_intensity": squall_median,
-                "areas": grid_to_polygons(lats_s, lons_s, squall_smooth, country_mask),
-            },
-            "general_winter_risk": {
-                "note": "Polaczenie SNOW+COLD+ICE+BLIZZARD+SNOW_SQUALLS w jeden wskaznik - NIE "
-                        "prosta suma. Bazowy poziom to najgrozniejszy z pieciu hazardow w danym "
-                        "punkcie; jesli co najmniej DWA hazardy jednoczesnie osiagaja ENHANCED "
-                        "lub wyzej, calosc podbijana o jeden poziom.",
-                "level_grid": general_level,
-                "areas": grid_to_polygons(lats_s, lons_s, general_smooth, country_mask),
-            },
-        },
+        "days": days_out,
     }
 
     with open("swwf.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"\nZapisano swwf.json ({len(precip_member_grids)}/{len(MEMBERS)} członków użytych)")
+    print(f"\nZapisano swwf.json ({len(precip_member_grids[0])}/{len(MEMBERS)} członków użytych, "
+          f"{len(DAY_WINDOWS)} doby)")
 
 
 if __name__ == "__main__":
