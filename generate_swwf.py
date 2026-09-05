@@ -155,6 +155,20 @@ def snow_density_ratio(t2m_c):
            xr.where(t2m_c <= 0, 10.0, 7.0)))
 
 
+def wind_chill_c(t2m_c, gust_ms):
+    """Temperatura odczuwalna (wind chill) — standardowy wzór NWS/Environment
+    Canada. Ważny tylko dla T<=10C i wiatru >4.8 km/h; poza tym zakresem
+    temperatura odczuwalna = temperatura rzeczywista (brak efektu wychłodzenia).
+    Naprawia lukę z sekcji 9 planu — COLD liczyło dotąd tylko suchą temperaturę,
+    ignorując wiatr, mimo że dane o wietrze (GUST) i tak już mamy w pipeline
+    (dla BLIZZARD)."""
+    wind_kmh = gust_ms * 3.6
+    wc = (13.12 + 0.6215 * t2m_c - 11.37 * (wind_kmh ** 0.16)
+          + 0.3965 * t2m_c * (wind_kmh ** 0.16))
+    valid = (t2m_c <= 10) & (wind_kmh > 4.8)
+    return xr.where(valid, wc, t2m_c)
+
+
 def find_latest_run():
     """Szuka najnowszego przebiegu GEFS, który faktycznie już jest dostępny na AWS —
     sprawdzane na dwóch członkach (1 i 30), bo synchronizacja bywa rozłożona w czasie."""
@@ -435,7 +449,7 @@ def main():
             for day_idx, day_info in enumerate(DAY_WINDOWS):
                 precip_total = None
                 snow_total = None
-                min_t2m = None
+                min_feels_like = None
                 icing_precip_total = None
                 blizzard_max_gust = None
                 squall_max_cape = None
@@ -452,6 +466,14 @@ def main():
                     ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
                     t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15
 
+                    # GUST pobierane tutaj (nie dopiero przy BLIZZARD niżej), bo potrzebne
+                    # już teraz do wind chill w COLD — ta sama zmienna, jeden fetch,
+                    # używana w dwóch miejscach
+                    H_g = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                 member=m, fxx=fxx, priority=["aws"], verbose=False)
+                    ds_g = H_g.xarray(":GUST:surface:", remove_grib=True)
+                    gust_window = crop_to_region(ds_g[list(ds_g.data_vars)[0]])
+
                     # --- SNOW: CPOFP (procent opadu zamarzniętego, z mikrofizyki modelu) ---
                     H_cpofp = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                      member=m, fxx=fxx, priority=["aws"], verbose=False)
@@ -464,7 +486,12 @@ def main():
 
                     precip_total = precip_window if precip_total is None else precip_total + precip_window
                     snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
-                    min_t2m = t2m_window_c if min_t2m is None else xr.where(t2m_window_c < min_t2m, t2m_window_c, min_t2m)
+
+                    # --- COLD: temperatura ODCZUWALNA (wind chill), nie sama sucha T2m ---
+                    # naprawia lukę z sekcji 9 planu — dawniej ignorowaliśmy wiatr całkowicie
+                    feels_like_window = wind_chill_c(t2m_window_c, gust_window)
+                    min_feels_like = feels_like_window if min_feels_like is None else \
+                        xr.where(feels_like_window < min_feels_like, feels_like_window, min_feels_like)
 
                     # --- ICE: CFRZR (kategoryczna flaga marznącego deszczu WPROST z modelu) ---
                     H_cfrzr = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
@@ -475,12 +502,7 @@ def main():
                     icing_precip_total = icing_precip_window if icing_precip_total is None \
                         else icing_precip_total + icing_precip_window
 
-                    # --- BLIZZARD: GUST + VIS + śnieg ŚWIEŻY LUB JUŻ LEŻĄCY (SNOD) ---
-                    H_g = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                                 member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_g = H_g.xarray(":GUST:surface:", remove_grib=True)
-                    gust_window = crop_to_region(ds_g[list(ds_g.data_vars)[0]])
-
+                    # --- BLIZZARD: GUST (już pobrany wyżej) + VIS + śnieg ŚWIEŻY LUB JUŻ LEŻĄCY (SNOD) ---
                     H_vis = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                    member=m, fxx=fxx, priority=["aws"], verbose=False)
                     ds_vis = H_vis.xarray(":VIS:surface:", remove_grib=True)
@@ -517,7 +539,7 @@ def main():
                     lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
                 precip_member_grids[day_idx].append(precip_total)
                 snow_member_grids[day_idx].append(snow_total)
-                cold_member_grids[day_idx].append(min_t2m)
+                cold_member_grids[day_idx].append(min_feels_like)
                 icing_precip_member_grids[day_idx].append(icing_precip_total)
                 blizzard_gust_member_grids[day_idx].append(blizzard_max_gust)
                 squall_cape_member_grids[day_idx].append(squall_max_cape)
@@ -577,8 +599,9 @@ def main():
                 },
                 "cold_min_t2m_c": {
                     "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
-                            "T2m z 4 odczytow co 6h w ciagu doby - przyblizenie, nie prawdziwe "
-                            "ciagle minimum).",
+                            "temperatury ODCZUWALNEJ - wind chill, standardowy wzor NWS/Environment "
+                            "Canada z uwzglednieniem GUST, nie sama sucha T2m jak wczesniej - z 4 "
+                            "odczytow co 6h w ciagu doby - przyblizenie, nie prawdziwe ciagle minimum).",
                     "level_grid": cold_level,
                     "median_intensity": cold_median,
                     "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
