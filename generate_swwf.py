@@ -488,10 +488,29 @@ def main():
                     snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
 
                     # --- COLD: temperatura ODCZUWALNA (wind chill), nie sama sucha T2m ---
-                    # naprawia lukę z sekcji 9 planu — dawniej ignorowaliśmy wiatr całkowicie
+                    # naprawia lukę z sekcji 9 planu — dawniej ignorowaliśmy wiatr całkowicie.
+                    # Próbkujemy też W POŁOWIE okna (fxx=start+3), nie tylko na jego końcu —
+                    # GEFS ma dane co 3h (potwierdzone testem), więc realne minimum w ciągu
+                    # doby jest teraz liczone z 8 punktów zamiast 4, bliżej prawdziwego
+                    # ciągłego minimum. Dotyczy TYLKO COLD — reszta hazardów dalej agreguje
+                    # po zwykłych oknach 6-godzinnych, nie ma potrzeby ich zagęszczać.
                     feels_like_window = wind_chill_c(t2m_window_c, gust_window)
                     min_feels_like = feels_like_window if min_feels_like is None else \
                         xr.where(feels_like_window < min_feels_like, feels_like_window, min_feels_like)
+
+                    mid_fxx = start + 3
+                    H_t_mid = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                     member=m, fxx=mid_fxx, priority=["aws"], verbose=False)
+                    ds_t_mid = H_t_mid.xarray(":TMP:2 m above ground:", remove_grib=True)
+                    t2m_mid_c = crop_to_region(ds_t_mid["t2m"]) - 273.15
+
+                    H_g_mid = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
+                                     member=m, fxx=mid_fxx, priority=["aws"], verbose=False)
+                    ds_g_mid = H_g_mid.xarray(":GUST:surface:", remove_grib=True)
+                    gust_mid = crop_to_region(ds_g_mid[list(ds_g_mid.data_vars)[0]])
+
+                    feels_like_mid = wind_chill_c(t2m_mid_c, gust_mid)
+                    min_feels_like = xr.where(feels_like_mid < min_feels_like, feels_like_mid, min_feels_like)
 
                     # --- ICE: CFRZR (kategoryczna flaga marznącego deszczu WPROST z modelu) ---
                     H_cfrzr = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
@@ -600,8 +619,9 @@ def main():
                 "cold_min_t2m_c": {
                     "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
                             "temperatury ODCZUWALNEJ - wind chill, standardowy wzor NWS/Environment "
-                            "Canada z uwzglednieniem GUST, nie sama sucha T2m jak wczesniej - z 4 "
-                            "odczytow co 6h w ciagu doby - przyblizenie, nie prawdziwe ciagle minimum).",
+                            "Canada z uwzglednieniem GUST, nie sama sucha T2m jak wczesniej - z 8 "
+                            "odczytow co 3h w ciagu doby, nie 4 co 6h jak wczesniej - blizsze "
+                            "prawdziwemu ciaglemu minimum, ale wciaz przyblizenie).",
                     "level_grid": cold_level,
                     "median_intensity": cold_median,
                     "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
