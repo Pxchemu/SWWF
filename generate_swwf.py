@@ -720,6 +720,61 @@ def main():
         "level_colors": MATRIX_LEVEL_COLORS,
         "cestof_matrix": CESTOF_MATRIX,
         "cestof_prob_bin_labels": ["<5", "5", "15", "30", "45", ">50"],
+        "hazard_info": {
+            "precip_24h_mm": {
+                "description": "Suma opadu wody w ciągu doby. Przedziały intensywności oparte na "
+                               "oficjalnych progach ostrzeżeń IMGW (intensywne opady deszczu "
+                               "powyżej 30mm/24h to próg stopnia 1; realne komunikaty stopnia 2 "
+                               "to zwykle 60-90mm, stopnia 3 nawet 80-140mm).",
+                "unit": "mm / 24h",
+                "intensity_bins": [b if b != float("inf") else None for b in PRECIP_INTENSITY_BINS_MM],
+            },
+            "snow_24h_cm": {
+                "description": "Grubość świeżego śniegu w ciągu doby. Liczona jako CPOFP (procent "
+                               "opadu zamarzniętego, z mikrofizyki modelu) razy przelicznik "
+                               "gęstości zależny od temperatury. Przedziały zbliżone do progu "
+                               "IMGW dla intensywnych opadów śniegu (powyżej 15cm/24h).",
+                "unit": "cm / 24h",
+                "intensity_bins": [b if b != float("inf") else None for b in SNOW_INTENSITY_BINS_CM],
+            },
+            "cold_min_t2m_c": {
+                "description": "Minimum temperatury ODCZUWALNEJ (wind chill — standardowy wzór "
+                               "NWS/Environment Canada, uwzględnia wiatr) w ciągu doby, próbkowane "
+                               "co 3h. Przedziały oparte na oficjalnym progu IMGW dla silnego "
+                               "mrozu (-15°C lub poniżej).",
+                "unit": "°C (odczuwalna)",
+                "intensity_bins": [b if b != float("-inf") else None for b in COLD_INTENSITY_BINS_C],
+            },
+            "ice_freezing_rain": {
+                "description": "Suma opadu, który spadł w oknach, gdzie CFRZR (kategoryczna flaga "
+                               "marznącego deszczu wprost z modelu, analizująca cały profil "
+                               "pionowy atmosfery) wskazała marznący deszcz. Im więcej opadu w "
+                               "takich warunkach, tym grubsza realna warstwa oblodzenia. IMGW "
+                               "traktuje to zjawisko kategorycznie (jest/nie ma), bez progów "
+                               "ilościowych — nasze przedziały są własną, roboczą propozycją.",
+                "unit": "mm opadu w warunkach marznących",
+                "intensity_bins": [b if b != float("inf") else None for b in ICE_INTENSITY_BINS_MM],
+            },
+            "blizzard": {
+                "description": "Szczytowy poryw wiatru w oknach, gdzie jednocześnie: poryw "
+                               f">= {BLIZZARD_GUST_THRESHOLD_MS} m/s, widzialność <= "
+                               f"{BLIZZARD_VIS_THRESHOLD_M}m, i śnieg świeży LUB już leżący na "
+                               "ziemi. Dolny próg to klasyczna definicja zamieci (NWS, ~35mph). "
+                               "IMGW uznaje wiatr za silny od 70 km/h (~19.4 m/s) w porywach.",
+                "unit": "m/s (szczytowy poryw)",
+                "intensity_bins": [b if b != float("inf") else None for b in BLIZZARD_INTENSITY_BINS_MS],
+            },
+            "snow_squalls": {
+                "description": "Szczytowe CAPE w oknach, gdzie jednocześnie: CAPE powyżej progu, "
+                               "opad w większości zamarznięty (CPOFP>=50%), i realny opad. To "
+                               "zupełnie nowy hazard (nagłe, gwałtowne opady śniegu o niemal "
+                               "burzowym charakterze) — IMGW nie ma takiej kategorii, przedziały "
+                               "są własną, roboczą propozycją bazującą na typowych wartościach "
+                               "zimowego CAPE (dużo niższych niż latem).",
+                "unit": "J/kg (szczytowe CAPE)",
+                "intensity_bins": [b if b != float("inf") else None for b in SQUALL_INTENSITY_BINS_JKG],
+            },
+        },
         "days": days_out,
     }
 
