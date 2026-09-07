@@ -56,6 +56,7 @@ from herbie import Herbie
 import numpy as np
 import xarray as xr
 import json
+import os
 import matplotlib
 matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w GitHub Actions nie ma
 import matplotlib.pyplot as plt
@@ -789,8 +790,29 @@ def main():
     with open("swwf.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
+    # --- Archiwizacja (Faza 5 planu) — lekka kopia Dnia 1 do przyszłego porównania
+    # prognoza-vs-rzeczywistość. Celowo BEZ polygonów (dużo miejsca, łatwe do odtworzenia
+    # z level_grid gdyby były kiedyś potrzebne) — tylko to, co potrzebne do weryfikacji
+    # liczbowej: siatka, poziomy zagrożenia i mediana intensywności per hazard.
+    os.makedirs("archive", exist_ok=True)
+    archive_record = {
+        "issued": result["issued"],
+        "model_run": result["model_run"],
+        "valid_from": days_out[0]["valid_from"],
+        "valid_to": days_out[0]["valid_to"],
+        "grid": result["grid"],
+        "hazards": {
+            key: {"level_grid": h["level_grid"], "median_intensity": h.get("median_intensity")}
+            for key, h in days_out[0]["hazards"].items()
+        },
+    }
+    archive_filename = f"archive/{run_time.strftime('%Y-%m-%d_%Hz')}.json"
+    with open(archive_filename, "w", encoding="utf-8") as f:
+        json.dump(archive_record, f, ensure_ascii=False, indent=2)
+
     print(f"\nZapisano swwf.json ({len(precip_member_grids[0])}/{len(MEMBERS)} członków użytych, "
           f"{len(DAY_WINDOWS)} doby)")
+    print(f"Zapisano archiwum: {archive_filename}")
 
 
 if __name__ == "__main__":
