@@ -125,14 +125,20 @@ MATRIX_LEVEL_COLORS = ['#ffffff', '#22c55e', '#fde047', '#fb923c', '#ef4444', '#
 MATRIX_PROB_BINS = [0, 5, 15, 30, 45, 50, 101]  # 6 przedziałów: <5,5-15,15-30,30-45,45-50,>=50
 
 # wiersze = przedział prawdopodobieństwa (rosnąco), kolumny = przedział intensywności
-# (rosnąco) -> wartość = indeks poziomu zagrożenia (1=SLIGHT .. 5=EXTREME)
+# (rosnąco) -> wartość = indeks poziomu zagrożenia (1=SLIGHT .. 5=EXTREME).
+#
+# CELOWO intensywność jest tu dominującym czynnikiem, nie prawdopodobieństwo: kolumny 1-2
+# (dwie najniższe intensywności, np. 1-10mm opadu) zostają SLIGHT NIEZALEŻNIE od
+# prawdopodobieństwa — sama wysoka pewność wystąpienia nie czyni z małego opadu groźniejszego
+# zjawiska. Prawdopodobieństwo działa jako modulator W RAMACH już podwyższonej intensywności
+# (kolumna 3 wzwyż), nie jako samodzielny czynnik eskalujący niegroźne zjawisko.
 CESTOF_MATRIX = [
-    [1, 1, 1, 2, 2, 3],
+    [1, 1, 1, 2, 3, 4],
     [1, 1, 2, 2, 3, 4],
-    [1, 2, 2, 3, 3, 4],
-    [2, 2, 3, 3, 4, 5],
-    [2, 3, 3, 4, 4, 5],
-    [2, 3, 4, 4, 5, 5],
+    [1, 1, 2, 3, 4, 5],
+    [1, 1, 2, 3, 4, 5],
+    [1, 1, 3, 4, 4, 5],
+    [1, 1, 3, 4, 5, 5],
 ]
 
 # przedziały intensywności per hazard — 7 granic definiujących 6 przedziałów (rosnąco)
@@ -400,7 +406,7 @@ def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
 
     # --- wersja natywna (do JSON / podglądu surowej siatki) ---
     level_idx_native = _apply_matrix(intensity_idx, _bucket_prob(prob))
-    real_median = np.median(values, axis=0)
+    real_median = np.median(values.astype(np.float64), axis=0)
 
     # --- wygładzanie: zagęszczamy medianę i prawdopodobieństwo, DOPIERO PÓŹNIEJ klasyfikujemy ---
     median_smooth = ndimage_zoom(median, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest")
