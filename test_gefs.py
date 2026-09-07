@@ -1,11 +1,7 @@
 """
-SWWF — test: czy rozszerzone zmienne (kategoryczny typ opadu, procent opadu
-zamarzniętego, pokrywa śniegu, CAPE, widzialność), o których rozmawialiśmy
-przy okazji Open-Meteo, są dostępne bezpośrednio w GEFS? Jeśli tak — nie
-potrzebujemy w ogóle innego źródła dla tych ulepszeń.
-
-Sprawdzamy najpierw w atmos.25 (którego już używamy w produkcji), a jeśli
-czegoś tam brakuje, sprawdzamy też w pełnym atmos.5 (tak jak przy T850).
+SWWF — test: czy GEFS (atmos.25) publikuje TMP/GUST co 3h (nie tylko co 6h)?
+Jeśli tak, możemy dwa razy gęściej próbkować minimum dla COLD, bez ruszania
+reszty hazardów (które i tak agregują po 6h oknach).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -13,21 +9,17 @@ from herbie import Herbie
 
 target_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d 00:00")
 
-WANTED = ["CRAIN", "CFRZR", "CICEP", "CSNOW", "CPOFP", "SNOD", "WEASD", "CAPE", "CIN", "VIS"]
+print(f"Przebieg: {target_date} UTC, człon 1, produkt atmos.25\n")
 
-for product in ["atmos.25", "atmos.5"]:
-    print(f"\n{'='*60}")
-    print(f"PRODUKT: {product}")
-    print('='*60)
-    H = Herbie(target_date, model="gefs", product=product, member=1, fxx=6,
-               priority=["aws"], verbose=False)
-    for var in WANTED:
-        try:
-            inv = H.inventory(search=f":{var}:")
-            if len(inv):
-                row = inv.iloc[0]
-                print(f"  {var:8s} -> JEST  (poziom: {row['level']}, opis: {row.get('phenomenon_description', row.get('?', ''))})")
-            else:
-                print(f"  {var:8s} -> brak")
-        except Exception as e:
-            print(f"  {var:8s} -> błąd sprawdzania ({e})")
+for fxx in [3, 6, 9, 12]:
+    print(f"--- fxx={fxx} ---")
+    try:
+        H = Herbie(target_date, model="gefs", product="atmos.25", member=1, fxx=fxx,
+                   priority=["aws"], verbose=False)
+        inv_t = H.inventory(search=":TMP:2 m above ground:")
+        inv_g = H.inventory(search=":GUST:surface:")
+        print(f"  TMP 2m:  {'JEST' if len(inv_t) else 'brak'}")
+        print(f"  GUST:    {'JEST' if len(inv_g) else 'brak'}")
+    except Exception as e:
+        print(f"  błąd: {e}")
+    print()
