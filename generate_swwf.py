@@ -143,8 +143,14 @@ CESTOF_MATRIX = [
 
 # przedziały intensywności per hazard — 7 granic definiujących 6 przedziałów (rosnąco)
 SNOW_INTENSITY_BINS_CM = [1, 5, 10, 15, 20, 30, np.inf]
-COLD_INTENSITY_BINS_C = [-5, -8, -11, -14, -17, -20, -np.inf]  # malejąco (im zimniej, tym gorzej)
-PRECIP_INTENSITY_BINS_MM = [1, 5, 10, 20, 35, 50, np.inf]
+# oparte o realny próg IMGW: "silny mróz" = T <= -15C (stopień 1). Używamy wind chill
+# (temperatury odczuwalnej), nie surowej T2m, więc te same liczby są tu nawet lekko
+# konserwatywne (odczuwalne -15C to realnie niebezpieczny mróz, tak samo jak surowe -15C)
+COLD_INTENSITY_BINS_C = [-5, -10, -15, -20, -25, -30, -np.inf]  # malejąco (im zimniej, tym gorzej)
+# oparte o realny próg IMGW: "intensywne opady deszczu" = powyżej 30mm/24h (stopień 1),
+# stopień 2 ~60-90mm, stopień 3 ~80-140mm (na podstawie faktycznych komunikatów IMGW) —
+# nasze wcześniejsze przedziały eskalowały dużo wcześniej niż realny próg ostrzeżenia
+PRECIP_INTENSITY_BINS_MM = [1, 10, 20, 30, 50, 80, np.inf]
 ICE_INTENSITY_BINS_MM = [0.1, 1, 2, 4, 6, 10, np.inf]           # mm opadu w warunkach marznących (CFRZR)
 BLIZZARD_INTENSITY_BINS_MS = [15.5, 18, 21, 24, 28, 33, np.inf]  # szczytowy poryw, m/s
 SQUALL_INTENSITY_BINS_JKG = [50, 100, 150, 200, 300, 400, np.inf]  # szczytowe CAPE w oknie ze śniegiem
