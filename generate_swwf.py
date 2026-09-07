@@ -183,17 +183,25 @@ def wind_chill_c(t2m_c, gust_ms):
 
 def find_latest_run():
     """Szuka najnowszego przebiegu GEFS, który faktycznie już jest dostępny na AWS —
-    sprawdzane na dwóch członkach (1 i 30), bo synchronizacja bywa rozłożona w czasie."""
+    sprawdzane na dwóch członkach (1 i 30), bo synchronizacja bywa rozłożona w czasie.
+
+    WAŻNE: sprawdzamy gotowość na fxx=72 (nasza najdalsza potrzebna godzina, dla Dnia 3),
+    nie na fxx=6 jak wcześniej — model liczy do przodu w czasie, więc dalsze godziny
+    prognozy pojawiają się na AWS PÓŹNIEJ niż wczesne. Sprawdzanie tylko fxx=6 (jak
+    robiliśmy, gdy liczyliśmy tylko dobę do przodu) potrafiło złapać przebieg gotowy
+    na +6h, ale jeszcze nie na +72h, dając błędy "No index file was found" przy
+    pobieraniu dalszych godzin."""
     now = datetime.now(timezone.utc)
     candidate = now.replace(minute=0, second=0, microsecond=0)
     candidate -= timedelta(hours=candidate.hour % 6)
+    max_needed_fxx = DAY_WINDOWS[-1]["windows"][-1][1]  # najdalsza godzina, jakiej potrzebujemy (72)
     for i in range(8):
         test_time = candidate - timedelta(hours=6 * i)
         try:
             H1 = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                        member=1, fxx=6, priority=["aws"], verbose=False)
+                        member=1, fxx=max_needed_fxx, priority=["aws"], verbose=False)
             H30 = Herbie(test_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
-                         member=30, fxx=6, priority=["aws"], verbose=False)
+                         member=30, fxx=max_needed_fxx, priority=["aws"], verbose=False)
             if H1.grib is not None and H30.grib is not None:
                 return test_time
         except Exception:
