@@ -411,7 +411,15 @@ def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
     intensity_idx_smooth = _bucket_by_bins(median_smooth, bins)
     level_idx_smooth = _apply_matrix(intensity_idx_smooth, _bucket_prob(prob_smooth))
 
-    return level_idx_native.tolist(), np.round(real_median, 1).tolist(), level_idx_smooth, lats_smooth, lons_smooth
+    # zapisujemy też SUROWE prawdopodobieństwo i przedziały (indeksy 0-5) macierzy —
+    # potrzebne do interaktywnego popupu na mapie (klik na polygon pokazuje macierz
+    # CESTOF z zaznaczoną dokładną komórką i realnymi liczbami, jak na cestof.com)
+    prob_idx_native = _bucket_prob(prob)
+    intensity_idx_out = np.where(intensity_idx >= 0, intensity_idx + 1, 0)  # 0=brak, 1-6=przedział
+
+    return (level_idx_native.tolist(), np.round(real_median, 1).tolist(), level_idx_smooth,
+            lats_smooth, lons_smooth, np.round(prob, 0).astype(int).tolist(),
+            intensity_idx_out.tolist(), (prob_idx_native + 1).tolist())
 
 
 def combine_general_risk(snow_idx, cold_idx, ice_idx, blizzard_idx, squall_idx):
@@ -579,12 +587,12 @@ def main():
         stacked_blizzard_gust = xr.concat(blizzard_gust_member_grids[day_idx], dim="member")
         stacked_squall_cape = xr.concat(squall_cape_member_grids[day_idx], dim="member")
 
-        precip_level, precip_median, precip_smooth, lats_s, lons_s = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM, lats, lons)
-        snow_level, snow_median, snow_smooth, _, _ = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM, lats, lons)
-        cold_level, cold_median, cold_smooth, _, _ = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, lats, lons, direction="le")
-        ice_level, ice_median, ice_smooth, _, _ = classify_hazard(stacked_icing_precip, ICE_INTENSITY_BINS_MM, lats, lons)
-        blizzard_level, blizzard_median, blizzard_smooth, _, _ = classify_hazard(stacked_blizzard_gust, BLIZZARD_INTENSITY_BINS_MS, lats, lons)
-        squall_level, squall_median, squall_smooth, _, _ = classify_hazard(stacked_squall_cape, SQUALL_INTENSITY_BINS_JKG, lats, lons)
+        precip_level, precip_median, precip_smooth, lats_s, lons_s, precip_prob, precip_iidx, precip_pidx = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM, lats, lons)
+        snow_level, snow_median, snow_smooth, _, _, snow_prob, snow_iidx, snow_pidx = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM, lats, lons)
+        cold_level, cold_median, cold_smooth, _, _, cold_prob, cold_iidx, cold_pidx = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, lats, lons, direction="le")
+        ice_level, ice_median, ice_smooth, _, _, ice_prob, ice_iidx, ice_pidx = classify_hazard(stacked_icing_precip, ICE_INTENSITY_BINS_MM, lats, lons)
+        blizzard_level, blizzard_median, blizzard_smooth, _, _, blizzard_prob, blizzard_iidx, blizzard_pidx = classify_hazard(stacked_blizzard_gust, BLIZZARD_INTENSITY_BINS_MS, lats, lons)
+        squall_level, squall_median, squall_smooth, _, _, squall_prob, squall_iidx, squall_pidx = classify_hazard(stacked_squall_cape, SQUALL_INTENSITY_BINS_JKG, lats, lons)
 
         # combine_general_risk liczymy na WYGŁADZONYCH siatkach (ten sam kształt dla
         # wszystkich pięciu, bo ten sam współczynnik zagęszczenia i ta sama siatka natywna)
@@ -605,6 +613,9 @@ def main():
                             "wody, mm/24h) - styl CESTOF, nie osobne progi.",
                     "level_grid": precip_level,
                     "median_intensity": precip_median,
+                    "probability_grid": precip_prob,
+                    "intensity_bin_grid": precip_iidx,
+                    "probability_bin_grid": precip_pidx,
                     "areas": grid_to_polygons(lats_s, lons_s, precip_smooth, country_mask),
                 },
                 "snow_24h_cm": {
@@ -614,6 +625,9 @@ def main():
                             "plynne przejscie, nie sztywny prog temperatury jak wczesniej.",
                     "level_grid": snow_level,
                     "median_intensity": snow_median,
+                    "probability_grid": snow_prob,
+                    "intensity_bin_grid": snow_iidx,
+                    "probability_bin_grid": snow_pidx,
                     "areas": grid_to_polygons(lats_s, lons_s, snow_smooth, country_mask),
                 },
                 "cold_min_t2m_c": {
@@ -624,6 +638,9 @@ def main():
                             "prawdziwemu ciaglemu minimum, ale wciaz przyblizenie).",
                     "level_grid": cold_level,
                     "median_intensity": cold_median,
+                    "probability_grid": cold_prob,
+                    "intensity_bin_grid": cold_iidx,
+                    "probability_bin_grid": cold_pidx,
                     "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
                 },
                 "ice_freezing_rain": {
@@ -634,6 +651,9 @@ def main():
                             "nasz dawny test T2m/T850.",
                     "level_grid": ice_level,
                     "median_intensity": ice_median,
+                    "probability_grid": ice_prob,
+                    "intensity_bin_grid": ice_iidx,
+                    "probability_bin_grid": ice_pidx,
                     "areas": grid_to_polygons(lats_s, lons_s, ice_smooth, country_mask),
                 },
                 "blizzard": {
@@ -647,6 +667,9 @@ def main():
                             "nowych opadow), czego wczesniej nie wykrywalismy.",
                     "level_grid": blizzard_level,
                     "median_intensity": blizzard_median,
+                    "probability_grid": blizzard_prob,
+                    "intensity_bin_grid": blizzard_iidx,
+                    "probability_bin_grid": blizzard_pidx,
                     "areas": grid_to_polygons(lats_s, lons_s, blizzard_smooth, country_mask),
                 },
                 "snow_squalls": {
@@ -658,6 +681,9 @@ def main():
                             f"{MIN_PRECIP_FOR_SQUALL_MM}mm.",
                     "level_grid": squall_level,
                     "median_intensity": squall_median,
+                    "probability_grid": squall_prob,
+                    "intensity_bin_grid": squall_iidx,
+                    "probability_bin_grid": squall_pidx,
                     "areas": grid_to_polygons(lats_s, lons_s, squall_smooth, country_mask),
                 },
                 "general_winter_risk": {
@@ -680,6 +706,8 @@ def main():
         "grid": {"lat": lats, "lon": lons},
         "level_names": MATRIX_LEVEL_NAMES,
         "level_colors": MATRIX_LEVEL_COLORS,
+        "cestof_matrix": CESTOF_MATRIX,
+        "cestof_prob_bin_labels": ["<5", "5", "15", "30", "45", ">50"],
         "days": days_out,
     }
 
