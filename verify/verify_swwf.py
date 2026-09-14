@@ -135,7 +135,12 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"\nZapisano {out_path}")
+    # kopia pod stałą nazwą — frontend zawsze pyta o to samo, bez zgadywania
+    # daty (unika problemów ze strefami czasowymi / brakującymi dniami)
+    with open("verification/latest.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    print(f"\nZapisano {out_path} (i verification/latest.json)")
     print(f"Średnie odchylenie (bias): {result['summary']['mean_bias_mm']} mm")
     print(f"Średni błąd bezwzględny: {result['summary']['mean_absolute_error_mm']} mm")
 
