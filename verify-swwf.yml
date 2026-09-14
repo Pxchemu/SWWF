@@ -1,0 +1,41 @@
+name: SWWF - weryfikacja opadu (prognoza vs rzeczywistosc)
+
+on:
+  workflow_dispatch:   # da sie uruchomic recznie, przyciskiem
+  schedule:
+    # raz dziennie, 10:00 UTC - IMERG Early Run dla wczorajszej doby (zamknietej
+    # o 00:00 UTC) powinien byc gotowy najpozniej ok. 4h pozniej, wiec 10:00
+    # daje spory zapas bezpieczenstwa
+    - cron: '0 10 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install earthaccess xarray numpy netCDF4 h5netcdf
+
+      - name: Uruchom weryfikacje
+        env:
+          EARTHDATA_USERNAME: ${{ secrets.EARTHDATA_USERNAME }}
+          EARTHDATA_PASSWORD: ${{ secrets.EARTHDATA_PASSWORD }}
+        run: python verify/verify_swwf.py
+
+      - name: Zapisz wynik z powrotem do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add verification/
+          git diff --staged --quiet || git commit -m "Weryfikacja opadu"
+          git push
