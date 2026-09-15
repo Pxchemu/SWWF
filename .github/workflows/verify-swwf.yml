@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Zainstaluj biblioteki
-        run: pip install earthaccess xarray numpy netCDF4 h5netcdf scipy
+        run: pip install earthaccess xarray numpy netCDF4 h5netcdf scipy matplotlib geojsoncontour shapely requests
 
       - name: Uruchom weryfikacje
         env:
