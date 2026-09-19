@@ -7,7 +7,7 @@ bo synchronizacja na AWS bywa rozłożona w czasie), liczy dla każdego hazardu:
     SNOW SQUALLS (nagłe, gwałtowne opady śniegu)
   - oraz połączone GENERAL WINTER RISK
 
-POZIOM ZAGROŻENIA — styl CESTOF/ESTOFEX (macierz prawdopodobieństwo × intensywność):
+POZIOM ZAGROŻENIA — macierz prawdopodobieństwo × intensywność:
 zamiast osobno klasyfikować kilka niezależnych progów po samym prawdopodobieństwie
 (co ignorowało, że np. 20cm śniegu to dużo poważniejsza sytuacja niż 5cm przy tej
 samej szansie wystąpienia), każdy punkt siatki dostaje JEDEN wynik: mediana z ensemble
@@ -33,7 +33,7 @@ to ilość opadu w oknach z CFRZR, dla BLIZZARD to szczytowy poryw wiatru w okna
 z zamiecią, dla SQUALLS to szczytowe CAPE w oknach z aktywnym opadem śniegu.
 
 UWAGA: przelicznik gęstości śniegu (funkcja snow_density_ratio), progi
-ICE/BLIZZARD/SQUALLS i sama macierz CESTOF_MATRIX to celowo uproszczone wartości
+ICE/BLIZZARD/SQUALLS i sama macierz SWWF_MATRIX to celowo uproszczone wartości
 robocze — do skalibrowania danymi z weryfikacji (patrz plan projektu, sekcja 4, 8 i 9).
 
 UWAGA 2: produkt 0.25° (atmos.25) JEST w pełni dostępny na AWS dla wszystkich
@@ -120,7 +120,7 @@ MIN_SNOW_DEPTH_FOR_GROUND_BLIZZARD_CM = 5.0  # ISTNIEJĄCA pokrywa — "ground b
 SQUALL_CAPE_THRESHOLD_JKG = 50.0
 MIN_PRECIP_FOR_SQUALL_MM = 0.5
 
-# ---------- macierz CESTOF: prawdopodobieństwo × intensywność -> poziom zagrożenia ----------
+# ---------- macierz SWWF: prawdopodobieństwo × intensywność -> poziom zagrożenia ----------
 MATRIX_LEVEL_NAMES = ['NONE', 'SLIGHT', 'ENHANCED', 'MODERATE', 'HIGH', 'EXTREME']
 MATRIX_LEVEL_COLORS = ['#ffffff', '#22c55e', '#fde047', '#fb923c', '#ef4444', '#c026d3']
 MATRIX_PROB_BINS = [0, 5, 15, 30, 45, 50, 101]  # 6 przedziałów: <5,5-15,15-30,30-45,45-50,>=50
@@ -133,7 +133,7 @@ MATRIX_PROB_BINS = [0, 5, 15, 30, 45, 50, 101]  # 6 przedziałów: <5,5-15,15-30
 # prawdopodobieństwa — sama wysoka pewność wystąpienia nie czyni z małego opadu groźniejszego
 # zjawiska. Prawdopodobieństwo działa jako modulator W RAMACH już podwyższonej intensywności
 # (kolumna 3 wzwyż), nie jako samodzielny czynnik eskalujący niegroźne zjawisko.
-CESTOF_MATRIX = [
+SWWF_MATRIX = [
     [1, 1, 1, 2, 3, 4],
     [1, 1, 2, 2, 3, 4],
     [1, 1, 2, 3, 4, 5],
@@ -379,7 +379,7 @@ def _bucket_prob(prob):
 
 
 def _apply_matrix(intensity_idx, prob_idx):
-    matrix_np = np.array(CESTOF_MATRIX)
+    matrix_np = np.array(SWWF_MATRIX)
     level_idx = np.zeros(intensity_idx.shape, dtype=int)
     has_signal = intensity_idx >= 0
     level_idx[has_signal] = matrix_np[prob_idx[has_signal], intensity_idx[has_signal]]
@@ -387,7 +387,7 @@ def _apply_matrix(intensity_idx, prob_idx):
 
 
 def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
-    """Serce systemu CESTOF: łączy prawdopodobieństwo i intensywność w jeden poziom.
+    """Serce systemu SWWF: łączy prawdopodobieństwo i intensywność w jeden poziom.
 
     stacked: xr.DataArray (member, lat, lon)
     intensity_bins: 7 granic (rosnąco) definiujących 6 przedziałów intensywności
@@ -395,7 +395,7 @@ def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
     direction="le": mniej/niżej = gorzej (mróz — ujemne temperatury)
 
     WAŻNE: wygładzanie (zagęszczanie siatki) dzieje się TUTAJ, na CIĄGŁYCH wielkościach
-    (mediana, prawdopodobieństwo) — PRZED klasyfikacją na poziomy CESTOF, nie po niej.
+    (mediana, prawdopodobieństwo) — PRZED klasyfikacją na poziomy SWWF, nie po niej.
     Uśrednianie już-skategoryzowanych poziomów (SLIGHT/MODERATE/...) nie miałoby
     dobrej interpretacji fizycznej — to tylko liczby porządkowe, nie ciągła skala.
 
@@ -434,7 +434,7 @@ def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
 
     # zapisujemy też SUROWE prawdopodobieństwo i przedziały (indeksy 0-5) macierzy —
     # potrzebne do interaktywnego popupu na mapie (klik na polygon pokazuje macierz
-    # CESTOF z zaznaczoną dokładną komórką i realnymi liczbami, jak na cestof.com)
+    # macierz z zaznaczoną dokładną komórką i realnymi liczbami)
     prob_idx_native = _bucket_prob(prob)
     intensity_idx_out = np.where(intensity_idx >= 0, intensity_idx + 1, 0)  # 0=brak, 1-6=przedział
 
@@ -631,7 +631,7 @@ def main():
             "hazards": {
                 "precip_24h_mm": {
                     "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (opad "
-                            "wody, mm/24h) - styl CESTOF, nie osobne progi.",
+                            "wody, mm/24h), nie osobne progi.",
                     "level_grid": precip_level,
                     "median_intensity": precip_median,
                     "probability_grid": precip_prob,
@@ -727,8 +727,8 @@ def main():
         "grid": {"lat": lats, "lon": lons},
         "level_names": MATRIX_LEVEL_NAMES,
         "level_colors": MATRIX_LEVEL_COLORS,
-        "cestof_matrix": CESTOF_MATRIX,
-        "cestof_prob_bin_labels": ["<5", "5", "15", "30", "45", ">50"],
+        "swwf_matrix": SWWF_MATRIX,
+        "swwf_prob_bin_labels": ["<5", "5", "15", "30", "45", ">50"],
         "hazard_info": {
             "precip_24h_mm": {
                 "description": "Suma opadu wody w ciągu doby. Przedziały intensywności oparte na "
