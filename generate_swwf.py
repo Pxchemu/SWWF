@@ -10,10 +10,17 @@ bo synchronizacja na AWS bywa rozłożona w czasie), liczy dla każdego hazardu:
 POZIOM ZAGROŻENIA — macierz prawdopodobieństwo × intensywność:
 zamiast osobno klasyfikować kilka niezależnych progów po samym prawdopodobieństwie
 (co ignorowało, że np. 20cm śniegu to dużo poważniejsza sytuacja niż 5cm przy tej
-samej szansie wystąpienia), każdy punkt siatki dostaje JEDEN wynik: mediana z ensemble
-wyznacza "diagnozowaną" intensywność (1-6), a prawdopodobieństwo osiągnięcia co
-najmniej tej intensywności trafia w wiersz macierzy — przecięcie obu daje ostateczny
-poziom NONE/SLIGHT/ENHANCED/MODERATE/HIGH/EXTREME.
+samej szansie wystąpienia), każdy punkt siatki dostaje JEDEN wynik. Dla KAŻDEGO z 6
+progów intensywności liczymy, jaka część członków zespołu go osiąga (P(>= próg)) i
+odczytujemy poziom z komórki macierzy (wiersz = to prawdopodobieństwo, kolumna = ten
+próg). Ostateczny poziom to NAJWYŻSZY z sześciu odczytów — dzięki temu ogon zespołu
+(np. 20% członków z dużym opadem śniegu) podnosi poziom, a nie ginie za medianą.
+
+DLACZEGO NIE "prawdopodobieństwo względem mediany" (poprzednia wersja): wystarczy
+połowa członków >= mediana z definicji, więc takie prawdopodobieństwo ZAWSZE wychodziło
+>=50% i oś prawdopodobieństwa macierzy była martwa (potwierdzone backtestem 2025-12-30:
+13 382 z 13 382 punktów z sygnałem w najwyższym przedziale). Obecne liczenie progowe
+wykorzystuje całą macierz.
 
 DETEKCJA HAZARDÓW — oparta na "gotowych" diagnostycznych zmiennych GEFS zamiast
 naszych własnych, uproszczonych progów:
@@ -125,6 +132,12 @@ MATRIX_LEVEL_NAMES = ['NONE', 'SLIGHT', 'ENHANCED', 'MODERATE', 'HIGH', 'EXTREME
 MATRIX_LEVEL_COLORS = ['#ffffff', '#22c55e', '#fde047', '#fb923c', '#ef4444', '#c026d3']
 MATRIX_PROB_BINS = [0, 5, 15, 30, 45, 50, 101]  # 6 przedziałów: <5,5-15,15-30,30-45,45-50,>=50
 
+# ile członków zespołu musi osiągać dany próg intensywności, żeby traktować go jako realny
+# sygnał. 1-2 członków z 30 to zwykle odstający szum, nie sygnał — a przy macierzy, w której
+# niskie prawdopodobieństwo bardzo wysokiej intensywności daje HIGH/EXTREME, pojedynczy
+# odstający członek zalewałby mapę. 3 z 30 = 10%. Do dostrojenia po backtestach.
+MIN_MEMBERS_FOR_SIGNAL = 3
+
 # wiersze = przedział prawdopodobieństwa (rosnąco), kolumny = przedział intensywności
 # (rosnąco) -> wartość = indeks poziomu zagrożenia (1=SLIGHT .. 5=EXTREME).
 #
@@ -144,10 +157,13 @@ SWWF_MATRIX = [
 
 # przedziały intensywności per hazard — 7 granic definiujących 6 przedziałów (rosnąco)
 SNOW_INTENSITY_BINS_CM = [1, 5, 10, 15, 20, 30, np.inf]
-# oparte o realny próg IMGW: "silny mróz" = T <= -15C (stopień 1). Używamy wind chill
-# (temperatury odczuwalnej), nie surowej T2m, więc te same liczby są tu nawet lekko
-# konserwatywne (odczuwalne -15C to realnie niebezpieczny mróz, tak samo jak surowe -15C)
-COLD_INTENSITY_BINS_C = [-5, -10, -15, -20, -25, -30, -np.inf]  # malejąco (im zimniej, tym gorzej)
+# Temperatura ODCZUWALNA (wind chill), nie surowa T2m. Oficjalny próg IMGW dla "silnego
+# mrozu" (-15C) wypada w środku TRZECIEGO przedziału. Wejście w podwyższone zagrożenie
+# (kolumna 3, ENHANCED/MODERATE) zaczyna się już od -10C odczuwalnej — po backteście
+# 30.12.2025 (odczuwalna ok. -12C przy wietrze i śnieżycy) wcześniejsza drabinka
+# (-15C jako wejście) dawała tylko SLIGHT. Górna część drabinki prawie bez zmian
+# (-18C ~ HIGH, -26C+ ~ HIGH/EXTREME), żeby nie eskalować realnie silnych mrozów jeszcze bardziej.
+COLD_INTENSITY_BINS_C = [-4, -7, -10, -18, -26, -34, -np.inf]  # malejąco (im zimniej, tym gorzej)
 # oparte o realny próg IMGW: "intensywne opady deszczu" = powyżej 30mm/24h (stopień 1),
 # stopień 2 ~60-90mm, stopień 3 ~80-140mm (na podstawie faktycznych komunikatów IMGW) —
 # nasze wcześniejsze przedziały eskalowały dużo wcześniej niż realny próg ostrzeżenia
@@ -386,6 +402,26 @@ def _apply_matrix(intensity_idx, prob_idx):
     return level_idx
 
 
+def _threshold_levels(prob_stack, n_members):
+    """Poziom zagrożenia z KAŻDEGO z 6 progów intensywności, a z nich najwyższy.
+
+    prob_stack: (6, lat, lon) — P(>= dolna granica k-tego przedziału) w %, k=0..5.
+    Dla progu k odczytujemy komórkę macierzy (wiersz = przedział tego prawdopodobieństwa,
+    kolumna = k), o ile próg osiąga co najmniej MIN_MEMBERS_FOR_SIGNAL członków.
+
+    Zwraca: level (lat, lon) 0-5, k_star (lat, lon) — numer progu, który zdecydował
+    (przy remisie poziomów wygrywa większe prawdopodobieństwo)."""
+    min_prob = MIN_MEMBERS_FOR_SIGNAL / n_members * 100.0
+    matrix_np = np.array(SWWF_MATRIX)
+    level_k = np.zeros(prob_stack.shape, dtype=int)
+    for k in range(6):
+        cell = matrix_np[_bucket_prob(prob_stack[k]), k]
+        level_k[k] = np.where(prob_stack[k] >= min_prob - 1e-9, cell, 0)
+    k_star = np.argmax(level_k * 1000.0 + prob_stack, axis=0)
+    level = np.take_along_axis(level_k, k_star[None, :, :], axis=0)[0]
+    return level, k_star
+
+
 def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
     """Serce systemu SWWF: łączy prawdopodobieństwo i intensywność w jeden poziom.
 
@@ -394,17 +430,25 @@ def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
     direction="ge": więcej/wyżej = gorzej (opad, śnieg, ICE, BLIZZARD)
     direction="le": mniej/niżej = gorzej (mróz — ujemne temperatury)
 
+    Dla każdego z 6 progów liczymy P(>= próg) po członkach zespołu i bierzemy najwyższy
+    poziom z macierzy (patrz _threshold_levels). Mediana zespołu NIE decyduje o poziomie —
+    jest tylko informacją pokazywaną w popupie.
+
     WAŻNE: wygładzanie (zagęszczanie siatki) dzieje się TUTAJ, na CIĄGŁYCH wielkościach
-    (mediana, prawdopodobieństwo) — PRZED klasyfikacją na poziomy SWWF, nie po niej.
+    (prawdopodobieństwa progowe) — PRZED klasyfikacją na poziomy, nie po niej.
     Uśrednianie już-skategoryzowanych poziomów (SLIGHT/MODERATE/...) nie miałoby
     dobrej interpretacji fizycznej — to tylko liczby porządkowe, nie ciągła skala.
 
     Zwraca:
       level_idx_native (lista list) — do zapisu w JSON / podglądu surowej siatki
-      median_native (lista list) — zdiagnozowana intensywność, do JSON
+      median_native (lista list) — mediana zespołu w realnych jednostkach, do JSON
       level_idx_smooth, lats_smooth, lons_smooth — wygładzona wersja, do polygonów
+      prob_native — P(>= decydujący próg) w %, a bez sygnału P(>= najniższy próg)
+      intensity_idx_out — numer decydującego przedziału 1-6 (0 = brak sygnału)
+      prob_bin_out — przedział prawdopodobieństwa 1-6 decydującej komórki macierzy
     """
     values = np.asarray(stacked.values)  # (member, lat, lon)
+    n_members = values.shape[0]
 
     if direction == "le":
         work = -values
@@ -413,34 +457,33 @@ def classify_hazard(stacked, intensity_bins, lats, lons, direction="ge"):
         work = values
         bins = list(intensity_bins)
 
-    median = np.median(work, axis=0)  # (lat, lon), w przestrzeni "work" (nie realnych jednostek)
-
-    intensity_idx = _bucket_by_bins(median, bins)
-    lower_bound_per_point = np.array(bins)[np.clip(intensity_idx, 0, 5)]
-    prob = (work >= lower_bound_per_point[None, :, :]).mean(axis=0) * 100
+    # P(>= próg k) w %, dla k = 0..5 — to jedyna wielkość, od której zależy poziom
+    prob_stack = np.stack([(work >= bins[k]).mean(axis=0) * 100.0 for k in range(6)], axis=0)
 
     # --- wersja natywna (do JSON / podglądu surowej siatki) ---
-    level_idx_native = _apply_matrix(intensity_idx, _bucket_prob(prob))
+    level_native, k_star = _threshold_levels(prob_stack, n_members)
+    has_signal = level_native > 0
+    prob_deciding = np.take_along_axis(prob_stack, k_star[None, :, :], axis=0)[0]
+    prob_shown = np.where(has_signal, prob_deciding, prob_stack[0])
     real_median = np.median(values.astype(np.float64), axis=0)
 
-    # --- wygładzanie: zagęszczamy medianę i prawdopodobieństwo, DOPIERO PÓŹNIEJ klasyfikujemy ---
-    median_smooth = ndimage_zoom(median, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest")
-    prob_smooth = np.clip(ndimage_zoom(prob, POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest"), 0, 100)
-    lats_smooth = np.linspace(lats[0], lats[-1], median_smooth.shape[0])
-    lons_smooth = np.linspace(lons[0], lons[-1], median_smooth.shape[1])
+    # --- wygładzanie: zagęszczamy prawdopodobieństwa progowe, DOPIERO PÓŹNIEJ klasyfikujemy ---
+    prob_stack_smooth = np.stack(
+        [np.clip(ndimage_zoom(prob_stack[k], POLYGON_SMOOTHING_FACTOR, order=3, mode="nearest"), 0, 100)
+         for k in range(6)], axis=0)
+    level_smooth, _ = _threshold_levels(prob_stack_smooth, n_members)
+    lats_smooth = np.linspace(lats[0], lats[-1], prob_stack_smooth.shape[1])
+    lons_smooth = np.linspace(lons[0], lons[-1], prob_stack_smooth.shape[2])
 
-    intensity_idx_smooth = _bucket_by_bins(median_smooth, bins)
-    level_idx_smooth = _apply_matrix(intensity_idx_smooth, _bucket_prob(prob_smooth))
+    # zapisujemy SUROWE prawdopodobieństwo i przedziały (indeksy 1-6) decydującej komórki
+    # macierzy — potrzebne do interaktywnego popupu na mapie (klik na polygon pokazuje
+    # macierz z zaznaczoną dokładną komórką, która zdecydowała o poziomie)
+    intensity_idx_out = np.where(has_signal, k_star + 1, 0)
+    prob_bin_out = _bucket_prob(prob_shown) + 1
 
-    # zapisujemy też SUROWE prawdopodobieństwo i przedziały (indeksy 0-5) macierzy —
-    # potrzebne do interaktywnego popupu na mapie (klik na polygon pokazuje macierz
-    # macierz z zaznaczoną dokładną komórką i realnymi liczbami)
-    prob_idx_native = _bucket_prob(prob)
-    intensity_idx_out = np.where(intensity_idx >= 0, intensity_idx + 1, 0)  # 0=brak, 1-6=przedział
-
-    return (level_idx_native.tolist(), np.round(real_median, 1).tolist(), level_idx_smooth,
-            lats_smooth, lons_smooth, np.round(prob, 0).astype(int).tolist(),
-            intensity_idx_out.tolist(), (prob_idx_native + 1).tolist())
+    return (level_native.tolist(), np.round(real_median, 1).tolist(), level_smooth,
+            lats_smooth, lons_smooth, np.round(prob_shown, 0).astype(int).tolist(),
+            intensity_idx_out.tolist(), prob_bin_out.tolist())
 
 
 def combine_general_risk(snow_idx, cold_idx, ice_idx, blizzard_idx, squall_idx):
@@ -749,8 +792,9 @@ def main():
             "cold_min_t2m_c": {
                 "description": "Minimum temperatury ODCZUWALNEJ (wind chill — standardowy wzór "
                                "NWS/Environment Canada, uwzględnia wiatr) w ciągu doby, próbkowane "
-                               "co 3h. Przedziały oparte na oficjalnym progu IMGW dla silnego "
-                               "mrozu (-15°C lub poniżej).",
+                               "co 3h. Podwyższone zagrożenie (trzeci przedział) zaczyna się od "
+                               "-10°C odczuwalnej; oficjalny próg IMGW dla silnego mrozu (-15°C) "
+                               "wypada w jego środku, a HIGH/EXTREME zaczynają się od -18°C i -26°C.",
                 "unit": "°C (odczuwalna)",
                 "intensity_bins": [b if b != float("-inf") else None for b in COLD_INTENSITY_BINS_C],
             },
