@@ -1,0 +1,66 @@
+name: SWWF - diagnostyka punktowa (rozbicie na czlonkow)
+
+on:
+  workflow_dispatch:   # tylko recznie
+    inputs:
+      run_time:
+        description: 'Przebieg GEFS, czas UTC, "RRRR-MM-DD GG:00"'
+        required: true
+        default: '2025-12-30 00:00'
+      lat:
+        description: 'Szerokosc geograficzna'
+        required: true
+        default: '52.23'
+      lon:
+        description: 'Dlugosc geograficzna'
+        required: true
+        default: '21.01'
+      name:
+        description: 'Nazwa punktu (do nazwy pliku wynikowego)'
+        required: true
+        default: 'Warszawa'
+      days:
+        description: 'Liczba dob (1-3)'
+        required: true
+        default: '2'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      RUN_TIME: ${{ inputs.run_time }}
+      LAT: ${{ inputs.lat }}
+      LON: ${{ inputs.lon }}
+      PNAME: ${{ inputs.name }}
+      DAYS: ${{ inputs.days }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install herbie-data matplotlib geojsoncontour scipy shapely
+
+      - name: Diagnostyka punktu
+        run: python diagnose_point.py "$RUN_TIME" "$LAT" "$LON" "$PNAME" "$DAYS"
+
+      - name: Zapisz wynik do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add backtest/
+          git diff --staged --quiet && exit 0
+          git commit -m "Diagnostyka SWWF: $PNAME, $RUN_TIME UTC"
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
