@@ -64,6 +64,7 @@ import numpy as np
 import xarray as xr
 import json
 import os
+import time
 import matplotlib
 matplotlib.use("Agg")  # bez tego matplotlib próbuje otworzyć okno, czego w GitHub Actions nie ma
 import matplotlib.pyplot as plt
@@ -224,6 +225,21 @@ def find_latest_run():
         except Exception:
             continue
     raise RuntimeError("Nie znaleziono żadnego dostępnego przebiegu GEFS w ostatnich 48h")
+
+
+def xarray_with_retry(H, search, attempts=3):
+    """H.xarray(...) z ponawianiem. Pojedyncze zerwania połączenia z AWS (np. "Connection reset
+    by peer") albo urwany plik tymczasowy Herbie zdarzają się sporadycznie i dawniej kosztowały
+    nas całego członka zespołu (2 z 30 w przebiegu 2026-10-06 12z). Ponowienie jednego żądania
+    jest tanie, utrata członka — nie."""
+    last_error = None
+    for i in range(attempts):
+        try:
+            return H.xarray(search, remove_grib=True)
+        except Exception as e:
+            last_error = e
+            time.sleep(2 * (i + 1))
+    raise last_error
 
 
 def crop_to_region(da):
@@ -517,6 +533,9 @@ def main():
     lats = lons = None
 
     for m in MEMBERS:
+        # wyniki członka trzymamy osobno i dopisujemy do wspólnych list DOPIERO, gdy udały się
+        # wszystkie doby — częściowo pobrany członek nie rozjeżdża liczności między dobami
+        staged = []
         try:
             for day_idx, day_info in enumerate(DAY_WINDOWS):
                 precip_total = None
@@ -530,12 +549,12 @@ def main():
 
                     H_p = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                  member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_p = H_p.xarray(f":APCP:surface:{start}-{end} hour acc", remove_grib=True)
+                    ds_p = xarray_with_retry(H_p, f":APCP:surface:{start}-{end} hour acc")
                     precip_window = crop_to_region(ds_p["tp"])
 
                     H_t = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                  member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_t = H_t.xarray(":TMP:2 m above ground:", remove_grib=True)
+                    ds_t = xarray_with_retry(H_t, ":TMP:2 m above ground:")
                     t2m_window_c = crop_to_region(ds_t["t2m"]) - 273.15
 
                     # GUST pobierane tutaj (nie dopiero przy BLIZZARD niżej), bo potrzebne
@@ -543,13 +562,13 @@ def main():
                     # używana w dwóch miejscach
                     H_g = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                  member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_g = H_g.xarray(":GUST:surface:", remove_grib=True)
+                    ds_g = xarray_with_retry(H_g, ":GUST:surface:")
                     gust_window = crop_to_region(ds_g[list(ds_g.data_vars)[0]])
 
                     # --- SNOW: CPOFP (procent opadu zamarzniętego, z mikrofizyki modelu) ---
                     H_cpofp = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                      member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_cpofp = H_cpofp.xarray(":CPOFP:surface:", remove_grib=True)
+                    ds_cpofp = xarray_with_retry(H_cpofp, ":CPOFP:surface:")
                     cpofp_window = crop_to_region(ds_cpofp[list(ds_cpofp.data_vars)[0]])
                     # CPOFP to chwilowa diagnoza na KOŃCU okna 6h; gdy w tym momencie nie pada,
                     # model podaje brak wartości (-50, albo mieszankę z nim na interpolacji) i
@@ -581,12 +600,12 @@ def main():
                     mid_fxx = start + 3
                     H_t_mid = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                      member=m, fxx=mid_fxx, priority=["aws"], verbose=False)
-                    ds_t_mid = H_t_mid.xarray(":TMP:2 m above ground:", remove_grib=True)
+                    ds_t_mid = xarray_with_retry(H_t_mid, ":TMP:2 m above ground:")
                     t2m_mid_c = crop_to_region(ds_t_mid["t2m"]) - 273.15
 
                     H_g_mid = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                      member=m, fxx=mid_fxx, priority=["aws"], verbose=False)
-                    ds_g_mid = H_g_mid.xarray(":GUST:surface:", remove_grib=True)
+                    ds_g_mid = xarray_with_retry(H_g_mid, ":GUST:surface:")
                     gust_mid = crop_to_region(ds_g_mid[list(ds_g_mid.data_vars)[0]])
 
                     feels_like_mid = wind_chill_c(t2m_mid_c, gust_mid)
@@ -595,7 +614,7 @@ def main():
                     # --- ICE: CFRZR (kategoryczna flaga marznącego deszczu WPROST z modelu) ---
                     H_cfrzr = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                      member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_cfrzr = H_cfrzr.xarray(":CFRZR:surface:", remove_grib=True)
+                    ds_cfrzr = xarray_with_retry(H_cfrzr, ":CFRZR:surface:")
                     cfrzr_window = crop_to_region(ds_cfrzr[list(ds_cfrzr.data_vars)[0]])
                     icing_precip_window = xr.where(cfrzr_window >= 0.5, precip_window, 0.0)
                     icing_precip_total = icing_precip_window if icing_precip_total is None \
@@ -604,12 +623,12 @@ def main():
                     # --- BLIZZARD: GUST (już pobrany wyżej) + VIS + śnieg ŚWIEŻY LUB JUŻ LEŻĄCY (SNOD) ---
                     H_vis = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                    member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_vis = H_vis.xarray(":VIS:surface:", remove_grib=True)
+                    ds_vis = xarray_with_retry(H_vis, ":VIS:surface:")
                     vis_window = crop_to_region(ds_vis[list(ds_vis.data_vars)[0]])  # metry
 
                     H_snod = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                     member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_snod = H_snod.xarray(":SNOD:surface:", remove_grib=True)
+                    ds_snod = xarray_with_retry(H_snod, ":SNOD:surface:")
                     snod_window_cm = crop_to_region(ds_snod[list(ds_snod.data_vars)[0]]) * 100.0  # m -> cm
 
                     snow_available = (snow_window_cm >= MIN_FRESH_SNOW_FOR_BLIZZARD_CM) | \
@@ -624,7 +643,7 @@ def main():
                     # --- SNOW SQUALLS: CAPE + aktywny, w większości zamarznięty opad ---
                     H_cape = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                     member=m, fxx=fxx, priority=["aws"], verbose=False)
-                    ds_cape = H_cape.xarray(":CAPE:surface:", remove_grib=True)
+                    ds_cape = xarray_with_retry(H_cape, ":CAPE:surface:")
                     cape_window = crop_to_region(ds_cape[list(ds_cape.data_vars)[0]])
                     squall_condition = (cape_window >= SQUALL_CAPE_THRESHOLD_JKG) & \
                                        (frozen_fraction >= 0.5) & \
@@ -636,12 +655,15 @@ def main():
                 if lats is None:
                     lats = [round(float(x), 3) for x in precip_total.latitude.values]
                     lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in precip_total.longitude.values]
-                precip_member_grids[day_idx].append(precip_total)
-                snow_member_grids[day_idx].append(snow_total)
-                cold_member_grids[day_idx].append(min_feels_like)
-                icing_precip_member_grids[day_idx].append(icing_precip_total)
-                blizzard_gust_member_grids[day_idx].append(blizzard_max_gust)
-                squall_cape_member_grids[day_idx].append(squall_max_cape)
+                staged.append((day_idx, precip_total, snow_total, min_feels_like,
+                               icing_precip_total, blizzard_max_gust, squall_max_cape))
+            for d_idx, p_t, s_t, c_t, i_t, b_t, q_t in staged:
+                precip_member_grids[d_idx].append(p_t)
+                snow_member_grids[d_idx].append(s_t)
+                cold_member_grids[d_idx].append(c_t)
+                icing_precip_member_grids[d_idx].append(i_t)
+                blizzard_gust_member_grids[d_idx].append(b_t)
+                squall_cape_member_grids[d_idx].append(q_t)
             print(f"  człon {m:>2}: OK")
         except Exception as e:
             failed.append(m)
