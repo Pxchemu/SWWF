@@ -37,5 +37,14 @@ jobs:
           git config user.name "SWWF Bot"
           git config user.email "actions@github.com"
           git add swwf.json archive/
-          git diff --staged --quiet || git commit -m "Aktualizacja swwf.json"
-          git push
+          git diff --staged --quiet && exit 0
+          git commit -m "Aktualizacja swwf.json"
+          # generowanie trwa ~36 minut — w tym czasie na main mogly wpasc inne commity (np. backtest,
+          # diagnostyka, albo kolejny przebieg), a wtedy zwykly "git push" jest odrzucany ("fetch
+          # first"), mimo ze prognoza sie policzyla. Stad rebase na aktualny main i ponawianie;
+          # "-X theirs" przy rebase oznacza: przy konflikcie wygrywa NASZ swiezo policzony wynik.
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
