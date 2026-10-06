@@ -53,7 +53,7 @@ def main():
     def fetch(member, fxx, search, var=None):
         h = gen.Herbie(stamp, model="gefs", product="atmos.25", member=member, fxx=fxx,
                        priority=["aws"], verbose=False)
-        ds = h.xarray(search, remove_grib=True)
+        ds = gen.xarray_with_retry(h, search)
         da = ds[var] if var else ds[list(ds.data_vars)[0]]
         return gen.crop_to_region(da)
 
