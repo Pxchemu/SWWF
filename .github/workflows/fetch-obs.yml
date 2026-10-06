@@ -1,0 +1,57 @@
+name: SWWF - pobierz obserwacje IMGW (stacje)
+
+on:
+  workflow_dispatch:   # tylko recznie
+    inputs:
+      start:
+        description: 'Data poczatkowa RRRR-MM-DD'
+        required: true
+        default: '2025-12-28'
+      end:
+        description: 'Data koncowa RRRR-MM-DD (ten sam rok co poczatkowa)'
+        required: true
+        default: '2025-12-31'
+      stations:
+        description: 'Fragment nazwy stacji (wielkie litery, mozna kilka po przecinku)'
+        required: true
+        default: 'WARSZAWA'
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OBS_START: ${{ inputs.start }}
+      OBS_END: ${{ inputs.end }}
+      OBS_STATIONS: ${{ inputs.stations }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install requests
+
+      - name: Pobierz obserwacje IMGW
+        run: python fetch_obs_imgw.py "$OBS_START" "$OBS_END" "$OBS_STATIONS"
+
+      - name: Zapisz wynik do repo
+        if: always()
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add obs/
+          git diff --staged --quiet && exit 0
+          git commit -m "Obserwacje IMGW: $OBS_STATIONS $OBS_START..$OBS_END"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
