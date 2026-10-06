@@ -551,7 +551,15 @@ def main():
                                      member=m, fxx=fxx, priority=["aws"], verbose=False)
                     ds_cpofp = H_cpofp.xarray(":CPOFP:surface:", remove_grib=True)
                     cpofp_window = crop_to_region(ds_cpofp[list(ds_cpofp.data_vars)[0]])
-                    frozen_fraction = xr.where(cpofp_window >= 0, cpofp_window / 100.0, 0.0)
+                    # CPOFP to chwilowa diagnoza na KOŃCU okna 6h; gdy w tym momencie nie pada,
+                    # model podaje brak wartości (-50, albo mieszankę z nim na interpolacji) i
+                    # dawniej cały opad takiego okna był zerowany ze śniegu. Backtest 2025-12-30
+                    # (Warszawa, diagnostyka na 30 członkach) pokazał, że tak ginęło 12-18%
+                    # opadu, a śnieg mediany był zaniżony o 24-41%. Tam, gdzie CPOFP jest
+                    # nieważne, bierzemy frakcję z temperatury: 1 przy T2m <= 0C, liniowo do 0 przy +2C.
+                    frozen_from_t = xr.where(t2m_window_c <= 0, 1.0,
+                                    xr.where(t2m_window_c >= 2, 0.0, (2.0 - t2m_window_c) / 2.0))
+                    frozen_fraction = xr.where(cpofp_window >= 0, cpofp_window / 100.0, frozen_from_t)
                     frozen_fraction = xr.where(frozen_fraction > 1, 1.0, frozen_fraction)
                     ratio = snow_density_ratio(t2m_window_c)
                     snow_window_cm = precip_window * frozen_fraction / 10.0 * ratio
@@ -783,7 +791,8 @@ def main():
             },
             "snow_24h_cm": {
                 "description": "Grubość świeżego śniegu w ciągu doby. Liczona jako CPOFP (procent "
-                               "opadu zamarzniętego, z mikrofizyki modelu) razy przelicznik "
+                               "opadu zamarzniętego, z mikrofizyki modelu; tam gdzie model nie "
+                               "podaje CPOFP — frakcja z temperatury) razy przelicznik "
                                "gęstości zależny od temperatury. Przedziały zbliżone do progu "
                                "IMGW dla intensywnych opadów śniegu (powyżej 15cm/24h).",
                 "unit": "cm / 24h",
