@@ -89,13 +89,10 @@ HAZARD_TITLES = {
     "general_winter_risk": "Ogólne ryzyko zimowe",
     "snow_24h_cm": "Śnieg",
     "cold_min_t2m_c": "Mróz",
-    "ice_freezing_rain": "Marznący deszcz",
-    "blizzard": "Zamieć",
     "snow_squalls": "Szkwały śnieżne",
     "precip_24h_mm": "Opad (hazard testowy)",
 }
-SIGNAL_HAZARDS = ["snow_24h_cm", "cold_min_t2m_c", "ice_freezing_rain", "blizzard",
-                  "snow_squalls", "general_winter_risk"]
+SIGNAL_HAZARDS = ["snow_24h_cm", "cold_min_t2m_c", "snow_squalls", "general_winter_risk"]
 EMOJI = ["⬜", "🟩", "🟨", "🟧", "🟥", "🟪"]
 WEEKDAYS = ["pn", "wt", "śr", "czw", "pt", "sob", "niedz"]
 LEVEL_DESC = ["brak zagrożenia", "niewielkie", "podwyższone", "umiarkowane", "wysokie", "ekstremalne"]
