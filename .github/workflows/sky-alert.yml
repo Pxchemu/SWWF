@@ -48,7 +48,8 @@ jobs:
       - name: Wyciagnij polygony (piaskownica Node)
         if: steps.fetch.outputs.ok == 'true'
         run: |
-          node --permission --allow-fs-read="$PWD/sky_raw.js" sky_eval.js sky_raw.js > sky_polygons.json
+          [ -f sky_eval.js ] || { echo "BRAK pliku sky_eval.js w glownym folderze repo - wgraj go (obok sky_alert.py)."; exit 1; }
+          node --permission --allow-fs-read="$PWD/sky_raw.js" --allow-fs-read="$PWD/sky_eval.js" sky_eval.js sky_raw.js > sky_polygons.json
           python3 -c "import json;print('Polygonow:', len(json.load(open('sky_polygons.json'))))"
 
       - name: Czy jest co sprawdzac
