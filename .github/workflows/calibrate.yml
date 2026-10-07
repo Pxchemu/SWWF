@@ -1,0 +1,56 @@
+name: SWWF - raport kalibracji (hindcast vs IMGW)
+
+on:
+  workflow_dispatch:   # tylko recznie
+    inputs:
+      hindcast_dir:
+        description: 'Folder z plikami hindcast (hindcast_v2 = rozszerzone dane z wiatrem i wilgotnoscia, hindcast = pilot)'
+        required: true
+        default: 'hindcast_v2'
+      obs_file:
+        description: 'Plik obserwacji w repo (puste = najnowszy obs/imgw_dobowe_*.csv.gz)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HC_DIR: ${{ inputs.hindcast_dir }}
+      OBS_FILE: ${{ inputs.obs_file }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install numpy
+
+      - name: Policz raport
+        run: |
+          if [ -n "$OBS_FILE" ]; then
+            python calibrate_swwf.py --hindcast "$HC_DIR" --obs "$OBS_FILE" --out "reports/calibration_report_${HC_DIR}.md"
+          else
+            python calibrate_swwf.py --hindcast "$HC_DIR" --out "reports/calibration_report_${HC_DIR}.md"
+          fi
+
+      - name: Zapisz raport do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add reports/
+          git diff --staged --quiet && exit 0
+          git commit -m "Raport kalibracji SWWF"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
