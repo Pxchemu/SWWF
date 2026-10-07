@@ -1,7 +1,6 @@
-# Kalibracja SWWF na obserwacjach IMGW — 2026-10-07 22:45
+# Kalibracja SWWF na obserwacjach IMGW — 2026-10-07 22:50
 hindcast: /home/runner/work/SWWF/SWWF/hindcast_v2 (63 przebiegów 00Z z 30 członkami, okien na przebieg: [13]); obs: imgw_dobowe_2020-11-01_2026-03-31_mc-1-2-3-11-12.csv.gz (52851 stacjodni)
-(UWAGA: nie znaleziono clim_runs.txt — raport bez podziału na dni spokojne)
-Próba jest dobrana pod zdarzenia (nie klimatologiczna) — FAR i odsetki dni zdarzeń nie są częstościami klimatologicznymi.
+Próba jest dobrana pod zdarzenia i dni spokojne (nie klimatologiczna) — FAR i odsetki zdarzeń z sekcji 1-5 dotyczą próby mieszanej; sekcja 6 rozdziela doby bez zdarzenia i ze zdarzeniem.
 
 ## 0. Kontrola okna doby IMGW (k=0)
 - opad SMDB: start  0 UTC: r=0.806 | start  6 UTC: r=0.854 | start 12 UTC: r=0.765 | start 18 UTC: r=0.638  (najwyższe r = okno zgodne z IMGW)
@@ -106,4 +105,40 @@ Uwaga: przebiegi bez pola widzialności (GEFS 2021) nie mogą dać flagi wg defi
     bez VIS (porywy >= 15.5 m/s + śnieg): P>=10%: traf. 43, fałsz. 816, przegap. 44 (POD 0.49, FAR 0.95, CSI 0.05) | P>=30%: traf. 30, fałsz. 599, przegap. 57 (POD 0.34, FAR 0.95, CSI 0.04) | P>=50%: traf. 21, fałsz. 469, przegap. 66 (POD 0.24, FAR 0.96, CSI 0.04)
     tylko porywy >= 15.5 m/s: P>=30%: traf. 37, fałsz. 915, przegap. 50 (POD 0.43, FAR 0.96, CSI 0.04) | P>=50%: traf. 31, fałsz. 774, przegap. 56 (POD 0.36, FAR 0.96, CSI 0.04)
     tylko porywy >= 20 m/s: P>=30%: traf. 3, fałsz. 282, przegap. 84 (POD 0.03, FAR 0.99, CSI 0.01) | P>=50%: traf. 2, fałsz. 209, przegap. 85 (POD 0.02, FAR 0.99, CSI 0.01)
+
+## 6. Fałszywe alarmy na dobach bez zdarzenia i trafienia na dobach ze zdarzeniem
+Alarm = P(zdarzenia) >= 30% wg zespołu. Doba 'bez zdarzenia' = zdarzenie na <= 1 stacji (wtedy każdy alarm jest fałszywy); 'ze zdarzeniem' = na >= 5 stacjach. 'doby z >=3 stacjami' = ile dób miało alarm na co najmniej 3 stacjach naraz (tyle widziałby użytkownik jako plamę na mapie).
+### wyprzedzenie k=0
+- śnieg >= 3 mm: doby bez zdarzenia: 40, stacjodni 2215, fałszywych alarmów 12 (5.4 na 1000 stacjodni); doby z >=3 stacjami: 1 z 40
+    doby ze zdarzeniem: 16, zdarzeń 218, trafionych 149 (POD 0.68), fałszywych alarmów na tych dobach 161
+- opad >= 10 mm: doby bez zdarzenia: 54, stacjodni 2988, fałszywych alarmów 17 (5.7 na 1000 stacjodni); doby z >=3 stacjami: 3 z 54
+    doby ze zdarzeniem: 3, zdarzeń 34, trafionych 29 (POD 0.85), fałszywych alarmów na tych dobach 16
+- mróz TMIN <= -10 C: doby bez zdarzenia: 47, stacjodni 2601, fałszywych alarmów 3 (1.2 na 1000 stacjodni); doby z >=3 stacjami: 0 z 47
+    doby ze zdarzeniem: 13, zdarzeń 430, trafionych 281 (POD 0.65), fałszywych alarmów na tych dobach 34
+- mróz TMIN <= -15 C: doby bez zdarzenia: 52, stacjodni 2878, fałszywych alarmów 0 (0.0 na 1000 stacjodni); doby z >=3 stacjami: 0 z 52
+    doby ze zdarzeniem: 8, zdarzeń 121, trafionych 45 (POD 0.37), fałszywych alarmów na tych dobach 10
+- zamieć (porywy >= 15.5 m/s + śnieg, bez VIS): doby bez zdarzenia: 56, stacjodni 2036, fałszywych alarmów 430 (211.2 na 1000 stacjodni); doby z >=3 stacjami: 18 z 56
+    doby ze zdarzeniem: 4, zdarzeń 55, trafionych 24 (POD 0.44), fałszywych alarmów na tych dobach 42
+### wyprzedzenie k=1
+- śnieg >= 3 mm: doby bez zdarzenia: 40, stacjodni 2215, fałszywych alarmów 28 (12.6 na 1000 stacjodni); doby z >=3 stacjami: 3 z 40
+    doby ze zdarzeniem: 17, zdarzeń 226, trafionych 158 (POD 0.70), fałszywych alarmów na tych dobach 176
+- opad >= 10 mm: doby bez zdarzenia: 51, stacjodni 2823, fałszywych alarmów 9 (3.2 na 1000 stacjodni); doby z >=3 stacjami: 1 z 51
+    doby ze zdarzeniem: 5, zdarzeń 44, trafionych 28 (POD 0.64), fałszywych alarmów na tych dobach 28
+- mróz TMIN <= -10 C: doby bez zdarzenia: 49, stacjodni 2710, fałszywych alarmów 2 (0.7 na 1000 stacjodni); doby z >=3 stacjami: 0 z 49
+    doby ze zdarzeniem: 12, zdarzeń 429, trafionych 266 (POD 0.62), fałszywych alarmów na tych dobach 41
+- mróz TMIN <= -15 C: doby bez zdarzenia: 53, stacjodni 2930, fałszywych alarmów 0 (0.0 na 1000 stacjodni); doby z >=3 stacjami: 0 z 53
+    doby ze zdarzeniem: 8, zdarzeń 121, trafionych 38 (POD 0.31), fałszywych alarmów na tych dobach 12
+- zamieć (porywy >= 15.5 m/s + śnieg, bez VIS): doby bez zdarzenia: 52, stacjodni 1864, fałszywych alarmów 466 (250.0 na 1000 stacjodni); doby z >=3 stacjami: 18 z 52
+    doby ze zdarzeniem: 5, zdarzeń 65, trafionych 23 (POD 0.35), fałszywych alarmów na tych dobach 42
+### wyprzedzenie k=2
+- śnieg >= 3 mm: doby bez zdarzenia: 42, stacjodni 2326, fałszywych alarmów 51 (21.9 na 1000 stacjodni); doby z >=3 stacjami: 5 z 42
+    doby ze zdarzeniem: 16, zdarzeń 223, trafionych 131 (POD 0.59), fałszywych alarmów na tych dobach 208
+- opad >= 10 mm: doby bez zdarzenia: 47, stacjodni 2598, fałszywych alarmów 18 (6.9 na 1000 stacjodni); doby z >=3 stacjami: 2 z 47
+    doby ze zdarzeniem: 9, zdarzeń 76, trafionych 37 (POD 0.49), fałszywych alarmów na tych dobach 38
+- mróz TMIN <= -10 C: doby bez zdarzenia: 49, stacjodni 2708, fałszywych alarmów 3 (1.1 na 1000 stacjodni); doby z >=3 stacjami: 0 z 49
+    doby ze zdarzeniem: 11, zdarzeń 320, trafionych 187 (POD 0.58), fałszywych alarmów na tych dobach 59
+- mróz TMIN <= -15 C: doby bez zdarzenia: 55, stacjodni 3040, fałszywych alarmów 2 (0.7 na 1000 stacjodni); doby z >=3 stacjami: 0 z 55
+    doby ze zdarzeniem: 7, zdarzeń 96, trafionych 25 (POD 0.26), fałszywych alarmów na tych dobach 13
+- zamieć (porywy >= 15.5 m/s + śnieg, bez VIS): doby bez zdarzenia: 54, stacjodni 1973, fałszywych alarmów 548 (277.7 na 1000 stacjodni); doby z >=3 stacjami: 18 z 54
+    doby ze zdarzeniem: 4, zdarzeń 56, trafionych 17 (POD 0.30), fałszywych alarmów na tych dobach 7
 
