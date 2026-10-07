@@ -370,11 +370,14 @@ def section_blizzard(runs, obs):
     say()
 
 
-def section_quiet(runs, obs, label):
-    """Fałszywe alarmy w przebiegach bez zjawisk: ile stacjodni i ile dni daje alarm, gdy nic się nie wydarzyło."""
-    say(f"## 6. Fałszywe alarmy — {label}")
-    say("Alarm = P(zdarzenia) >= 30% wg zespołu. Fałszywy = alarm bez zdarzenia na stacji. 'dni z >=3 stacjami' = liczba dób, w których "
-        "fałszywy alarm miało co najmniej 3 stacje naraz (tyle widziałby użytkownik jako obszar).")
+def section_quiet(runs, obs):
+    """Fałszywe alarmy na dobach BEZ zdarzenia vs trafienia na dobach ZE zdarzeniem.
+    Doba (przebieg, wyprzedzenie k) jest 'bez zdarzenia' dla danego hazardu, gdy zdarzenie zaszło na <= 1 stacji;
+    'ze zdarzeniem' — gdy na >= 5 stacjach. Dzięki temu nie trzeba listy przebiegów: liczy się to, co faktycznie zaszło."""
+    say("## 6. Fałszywe alarmy na dobach bez zdarzenia i trafienia na dobach ze zdarzeniem")
+    say("Alarm = P(zdarzenia) >= 30% wg zespołu. Doba 'bez zdarzenia' = zdarzenie na <= 1 stacji (wtedy każdy alarm jest fałszywy); "
+        "'ze zdarzeniem' = na >= 5 stacjach. 'doby z >=3 stacjami' = ile dób miało alarm na co najmniej 3 stacjach naraz "
+        "(tyle widziałby użytkownik jako plamę na mapie).")
     def snow_extra(A, w):
         ap = A["apcp"][:, :, w]; te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
         return {"v": (ap * clipf((3.0 - np.minimum(te, tm)) / 2.0)).sum(axis=2)}
@@ -399,7 +402,8 @@ def section_quiet(runs, obs, label):
     for k in (0, 1, 2):
         say(f"### wyprzedzenie k={k}")
         for name, shift, extra, obsfn, pfun, evfun in specs:
-            n_sd = n_alarm = n_false = n_hit = n_days = n_run_days = 0
+            fr = dict(days=0, sd=0, al=0, big=0)                 # doby bez zdarzenia
+            ev_ = dict(days=0, ev=0, hit=0, fa=0)                # doby ze zdarzeniem
             for R in sorted(runs):
                 s = build_sample({R: runs[R]}, obs, k, shift, extra)
                 if s.n == 0:
@@ -407,15 +411,19 @@ def section_quiet(runs, obs, label):
                 o = obsfn(s); ok = np.isfinite(o)
                 if not ok.any():
                     continue
-                al = pfun(s.M["v"][ok]) >= 0.3; ev = evfun(o[ok])
-                n_run_days += 1
-                n_sd += int(ok.sum()); n_alarm += int(al.sum()); n_hit += int((al & ev).sum())
-                f = int((al & ~ev).sum()); n_false += f
-                n_days += int(f >= 3)
-            if n_sd == 0:
-                continue
-            say(f"- {name}: stacjodni {n_sd}, alarmów {n_alarm} (trafnych {n_hit}, fałszywych {n_false} = {n_false / n_sd * 1000:.1f} na 1000 stacjodni); "
-                f"dni z >=3 stacjami fałszywymi: {n_days} z {n_run_days}")
+                al = pfun(s.M["v"][ok]) >= 0.3; ev = evfun(o[ok]); nev = int(ev.sum())
+                if nev <= 1:
+                    fr["days"] += 1; fr["sd"] += int(ok.sum()); fr["al"] += int(al.sum()); fr["big"] += int(al.sum() >= 3)
+                elif nev >= 5:
+                    ev_["days"] += 1; ev_["ev"] += nev; ev_["hit"] += int((al & ev).sum()); ev_["fa"] += int((al & ~ev).sum())
+            if fr["days"]:
+                say(f"- {name}: doby bez zdarzenia: {fr['days']}, stacjodni {fr['sd']}, fałszywych alarmów {fr['al']} "
+                    f"({fr['al'] / max(fr['sd'], 1) * 1000:.1f} na 1000 stacjodni); doby z >=3 stacjami: {fr['big']} z {fr['days']}")
+            else:
+                say(f"- {name}: brak dób bez zdarzenia w próbie")
+            if ev_["days"]:
+                say(f"    doby ze zdarzeniem: {ev_['days']}, zdarzeń {ev_['ev']}, trafionych {ev_['hit']} (POD {ev_['hit'] / max(ev_['ev'], 1):.2f}), "
+                    f"fałszywych alarmów na tych dobach {ev_['fa']}")
     say()
 
 
@@ -424,9 +432,6 @@ def main():
     ap.add_argument("--hindcast", default="hindcast_v2")
     ap.add_argument("--obs", default=None)
     ap.add_argument("--out", default="reports/calibration_report.md")
-    ap.add_argument("--quiet-list", default=None,
-                    help="plik z datami przebiegów 'bez zjawisk' (dowolny tekst z datami RRRR-MM-DD; np. clim_runs.txt). "
-                         "Włącza podział raportu na dni spokojne i dni ze zdarzeniami oraz sekcję 6 (fałszywe alarmy).")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     hd = a.hindcast if os.path.isabs(a.hindcast) else os.path.join(here, a.hindcast)
@@ -444,22 +449,8 @@ def main():
     obs = load_obs(obs_path)
     say(f"# Kalibracja SWWF na obserwacjach IMGW — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     say(f"hindcast: {hd} ({len(runs)} przebiegów 00Z z 30 członkami, okien na przebieg: {sorted({r['nwin'] for r in runs.values()})}); obs: {os.path.basename(obs_path)} ({len(obs)} stacjodni)")
-    quiet_dates = set()
-    ql = a.quiet_list
-    if ql:
-        qp = ql if os.path.isabs(ql) else os.path.join(here, ql)
-        if os.path.exists(qp):
-            import re
-            quiet_dates = {date.fromisoformat(m) for m in re.findall(r"\d{4}-\d{2}-\d{2}", open(qp, encoding="utf-8").read())}
-        else:
-            say(f"(UWAGA: nie znaleziono {ql} — raport bez podziału na dni spokojne)")
-    quiet = {d: r for d, r in runs.items() if d in quiet_dates}
-    events = {d: r for d, r in runs.items() if d not in quiet_dates}
-    if quiet:
-        say(f"Podział przebiegów wg {ql}: dni BEZ zjawisk: {len(quiet)}, pozostałe (dobrane pod zdarzenia): {len(events)}. "
-            "Sekcje 0-5 poniżej dotyczą WSZYSTKICH przebiegów (próba mieszana); sekcja 6 — rozbicie.")
-    else:
-        say("Próba jest dobrana pod zdarzenia (nie klimatologiczna) — FAR i odsetki dni zdarzeń nie są częstościami klimatologicznymi.")
+    say("Próba jest dobrana pod zdarzenia i dni spokojne (nie klimatologiczna) — FAR i odsetki zdarzeń z sekcji 1-5 dotyczą próby mieszanej; "
+        "sekcja 6 rozdziela doby bez zdarzenia i ze zdarzeniem.")
     say()
     section_alignment(runs, obs)
     section_precip(runs, obs)
@@ -467,10 +458,7 @@ def main():
     section_cold(runs, obs)
     section_ice(runs, obs)
     section_blizzard(runs, obs)
-    if quiet:
-        section_quiet(quiet, obs, f"przebiegi BEZ zjawisk ({len(quiet)})")
-        if events:
-            section_quiet(events, obs, f"przebiegi ze zdarzeniami ({len(events)}) — dla porównania")
+    section_quiet(runs, obs)
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
