@@ -104,13 +104,13 @@ jobs:
           path: hindcast_chunks
 
       - name: Scal kawalki w pliki na przebieg
-        run: python hindcast_points.py merge hindcast_chunks hindcast
+        run: python hindcast_points.py merge hindcast_chunks hindcast_v2
 
       - name: Zapisz wynik do repo
         run: |
           git config user.name "SWWF Bot"
           git config user.email "actions@github.com"
-          git add hindcast/
+          git add hindcast_v2/
           git diff --staged --quiet && exit 0
           git commit -m "Hindcast GEFS dla stacji IMGW"
           for i in 1 2 3 4 5; do
