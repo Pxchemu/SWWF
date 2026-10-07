@@ -75,14 +75,16 @@ CITIES = [
     ("Koszyce", 48.72, 21.26, 0.12, 0.07), ("Wiedeń", 48.21, 16.37, -0.95, 0.1),
 ]
 
-# motywy kolorystyczne (TG_THEME=dark|light, domyslnie dark)
+# motywy kolorystyczne (TG_THEME=dark|light, domyslnie dark) — paleta ze strony MeteoPanel
 THEMES = {
-    "dark": dict(fig="#0f141a", sea="#0b1620", land="#1b232d", border="#7d8a9b", admin="#8fa0b4",
-                 text="#e6edf3", sub="#9fb0c3", foot="#7d8a9b", city="#e6edf3", halo="#0f141a",
-                 poly_edge="#e6edf3", frame="#3a4757", none_swatch="#1b232d", poly_alpha=0.78),
-    "light": dict(fig="#ffffff", sea="#cfe3f1", land="#f3f1ea", border="#8a8a8a", admin="#9a968a",
-                  text="#111111", sub="#444444", foot="#666666", city="#222222", halo="#ffffff",
-                  poly_edge="#333333", frame="#555555", none_swatch="#ffffff", poly_alpha=0.72),
+    "dark": dict(fig="#0b0910", sea="#12101a", land="#1d1a2b", border="#6d6890", admin="#34304a",
+                 text="#f4f3f8", sub="#c9c5d6", foot="#9b97ad", city="#f4f3f8", halo="#0b0910",
+                 poly_edge="#f4f3f8", frame="#3a3650", none_swatch="#1d1a2b", poly_alpha=0.80,
+                 pill_on="#f4f3f8", pill_on_text="#0b0910", pill_off="#14111c"),
+    "light": dict(fig="#f4f3f8", sea="#dfe6f2", land="#fbfaff", border="#7a7596", admin="#cfcbe0",
+                  text="#14111c", sub="#4a4660", foot="#6b6783", city="#14111c", halo="#ffffff",
+                  poly_edge="#14111c", frame="#b9b4cc", none_swatch="#ffffff", poly_alpha=0.78,
+                  pill_on="#14111c", pill_on_text="#f4f3f8", pill_off="#ffffff"),
 }
 
 HAZARD_TITLES = {
@@ -172,84 +174,204 @@ def load_admin1():
     return out
 
 
+# ----------------------------------------------------------------------------- czcionki i logo
+def setup_fonts():
+    """Inter (tekst) + Archivo (naglowki) — te same, co na stronie. Szuka plikow TTF z npm
+    (@expo-google-fonts/*, instalowane w workflow) albo w TG_FONT_DIR; bez nich zostaje DejaVu."""
+    import glob
+    from matplotlib import font_manager as fm
+    roots = [os.environ.get("TG_FONT_DIR", "").strip(), "node_modules", "fonts/node_modules"]
+    found = 0
+    for root in [r for r in roots if r]:
+        for fam in ("inter", "archivo"):
+            for f in glob.glob(os.path.join(root, "**", "@expo-google-fonts", fam, "*", "*.ttf"), recursive=True) + \
+                     glob.glob(os.path.join(root, "@expo-google-fonts", fam, "*", "*.ttf")) + \
+                     glob.glob(os.path.join(root, "*.ttf")):
+                base = os.path.basename(f)
+                if any(x in base for x in ("Italic", "Condensed", "Expanded", "Narrow")):
+                    continue
+                try:
+                    fm.fontManager.addfont(f)
+                    found += 1
+                except Exception:
+                    pass
+    names = {f.name for f in fm.fontManager.ttflist}
+    body = "Inter" if "Inter" in names else "DejaVu Sans"
+    head = "Archivo" if "Archivo" in names else body
+    print(f"Czcionki: tekst={body}, nagłówki={head} (plików: {found})")
+    return body, head
+
+
+def rounded_rect_xy(x0, y0, x1, y1, rx, ry, n=10):
+    """Zaokraglony prostokat w ukladzie danych (rx, ry = promien w jednostkach osi x i y)."""
+    import numpy as np
+    pts = []
+    for cx, cy, a0 in ((x1 - rx, y1 - ry, 0), (x0 + rx, y1 - ry, 90), (x0 + rx, y0 + ry, 180), (x1 - rx, y0 + ry, 270)):
+        for t in np.linspace(a0, a0 + 90, n):
+            pts.append((cx + rx * np.cos(np.radians(t)), cy + ry * np.sin(np.radians(t))))
+    return pts
+
+
 # ----------------------------------------------------------------------------- rysowanie mapy
 def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: str, theme: str = "dark"):
+    from matplotlib.patches import FancyBboxPatch
     th = THEMES.get(theme, THEMES["dark"])
+    body, head = setup_fonts()
+    plt.rcParams["font.family"] = body
     names = swwf["level_names"]
     colors = swwf["level_colors"]
     hazard = day["hazards"][hazard_key]
     title = HAZARD_TITLES.get(hazard_key, hazard_key)
+    feats = (hazard.get("areas") or {}).get("features") or []
+    feats = sorted(feats, key=lambda f: level_index(f["properties"].get("level", ""), names))
+    present = {level_index(f["properties"].get("level", ""), names) for f in feats}
+    top = max(present) if present else 0
 
-    fig = plt.figure(figsize=(10, 6.6), dpi=130, facecolor=th["fig"])
-    ax = fig.add_axes([0.012, 0.075, 0.69, 0.80])
+    FW, FH = 10.0, 9.7
+    fig = plt.figure(figsize=(FW, FH), dpi=150, facecolor=th["fig"])
+
+    def fx(inch):
+        return inch / FW
+
+    def fy(inch):
+        return inch / FH
+
+    M = 0.42                                   # margines boczny (cale)
+    MAP_W = FW - 2 * M
+    ASPECT = 1.0 / 0.62                        # cos(~51.5 st.)
+    MAP_H = MAP_W * ((LAT_MAX - LAT_MIN) * ASPECT) / (LON_MAX - LON_MIN)
+    map_y = 1.66                               # dol mapy (cale od dolu): miejsce na legende i stopke
+
+    # ---- naglowek
+    logo_path = os.environ.get("TG_LOGO", "swwf_logo.png")
+    hx = M
+    if os.path.exists(logo_path):
+        try:
+            import matplotlib.image as mpimg
+            lax = fig.add_axes([fx(M), fy(FH - 0.30 - 0.78), fx(0.78), fy(0.78)])
+            lax.imshow(mpimg.imread(logo_path))
+            lax.axis("off")
+            hx = M + 0.78 + 0.22
+        except Exception as e:
+            print(f"Bez logo ({type(e).__name__})")
+    fig.text(fx(hx), fy(FH - 0.30 - 0.20), title, fontsize=21, fontweight="bold", family=head,
+             va="center", color=th["text"])
+    fig.text(fx(hx), fy(FH - 0.30 - 0.58),
+             f"{day['label']}  ·  ważne {fmt_day_range(day['valid_from'], day['valid_to'])} (czas polski)",
+             fontsize=10.5, color=th["sub"], va="center")
+
+    # ---- zakladki dni (jak na stronie): aktywny dzien wypelniony
+    ndays = len(swwf["days"])
+    cur = next((i for i, d in enumerate(swwf["days"]) if d["label"] == day["label"]), 0)
+    pill_w, pill_h, gap = 0.80, 0.30, 0.08
+    px = FW - M - ndays * pill_w - (ndays - 1) * gap
+    py = FH - 0.30 - 0.50
+    for i, d in enumerate(swwf["days"]):
+        x = px + i * (pill_w + gap)
+        active = i == cur
+        pax = fig.add_axes([fx(x), fy(py), fx(pill_w), fy(pill_h)])
+        pax.axis("off")
+        pax.set_xlim(0, 1)
+        pax.set_ylim(0, 1)
+        pax.add_patch(FancyBboxPatch((0.02, 0.04), 0.96, 0.92, boxstyle="round,pad=0,rounding_size=0.28",
+                                     fc=th["pill_on"] if active else th["pill_off"],
+                                     ec=th["pill_on"] if active else th["frame"], lw=0.8,
+                                     mutation_aspect=pill_h / pill_w))
+        pax.text(0.5, 0.5, d["label"], ha="center", va="center", fontsize=9, fontweight="semibold",
+                 color=th["pill_on_text"] if active else th["sub"])
+
+    # ---- mapa
+    ax = fig.add_axes([fx(M), fy(map_y), fx(MAP_W), fy(MAP_H)])
     ax.set_facecolor(th["sea"])
     ax.set_xlim(LON_MIN, LON_MAX)
     ax.set_ylim(LAT_MIN, LAT_MAX)
-    ax.set_aspect(1.0 / 0.62)  # cos(~51.5 st.)
+    ax.set_aspect(ASPECT, adjustable="box")
     ax.set_xticks([])
     ax.set_yticks([])
     for sp in ax.spines.values():
-        sp.set_color(th["frame"])
+        sp.set_visible(False)
 
-    for g in countries:  # ladu: tlo ladu
-        for p in geom_patches(g, facecolor=th["land"], edgecolor="none", zorder=1):
-            ax.add_patch(p)
-    for g in admin1:  # drobny podzial: wojewodztwa, landy
-        for p in geom_patches(g, facecolor="none", edgecolor=th["admin"], linewidth=0.5, zorder=3.5):
-            ax.add_patch(p)
+    # zaokraglone rogi karty mapy: promien ~0.16 cala, w jednostkach danych
+    r_in = 0.16
+    rx = r_in / MAP_W * (LON_MAX - LON_MIN)
+    ry = r_in / MAP_H * (LAT_MAX - LAT_MIN)
+    clip = Path(rounded_rect_xy(LON_MIN, LAT_MIN, LON_MAX, LAT_MAX, rx, ry))
+    clip_patch = PathPatch(clip, transform=ax.transData, fc="none", ec="none")
+    ax.add_patch(clip_patch)
 
-    feats = (hazard.get("areas") or {}).get("features") or []
-    feats = sorted(feats, key=lambda f: level_index(f["properties"].get("level", ""), names))
+    def add(p, z):
+        p.set_zorder(z)
+        p.set_clip_path(clip_patch)
+        ax.add_patch(p)
+
+    for g in countries:
+        for p in geom_patches(g, facecolor=th["land"], edgecolor="none"):
+            add(p, 1)
+    for g in admin1:
+        for p in geom_patches(g, facecolor="none", edgecolor=th["admin"], linewidth=0.45):
+            add(p, 3.5)
     for f in feats:
         lvl = level_index(f["properties"].get("level", ""), names)
         for p in geom_patches(shape(f["geometry"]), facecolor=colors[lvl], edgecolor=th["poly_edge"],
-                              linewidth=0.7, alpha=th["poly_alpha"], zorder=3):
-            ax.add_patch(p)
+                              linewidth=0.8, alpha=th["poly_alpha"]):
+            add(p, 3)
+    for g in countries:
+        for p in geom_patches(g, facecolor="none", edgecolor=th["border"], linewidth=0.9):
+            add(p, 4)
 
-    for g in countries:  # granice panstw na wierzchu, nad polygonami
-        for p in geom_patches(g, facecolor="none", edgecolor=th["border"], linewidth=0.8, zorder=4):
-            ax.add_patch(p)
-
-    halo = [pe.withStroke(linewidth=1.4, foreground=th["halo"])]
+    halo = [pe.withStroke(linewidth=2.2, foreground=th["halo"])]
     for name, lat, lon, dx, dy in CITIES:
-        ax.plot(lon, lat, "o", color=th["city"], markersize=2.4, zorder=5,
-                markeredgecolor=th["halo"], markeredgewidth=0.4)
-        ax.text(lon + dx, lat + dy, name, fontsize=6.3, color=th["city"], zorder=6, path_effects=halo)
+        ax.plot(lon, lat, "o", color=th["city"], markersize=2.6, zorder=5, markeredgecolor=th["halo"],
+                markeredgewidth=0.6, clip_path=clip_patch)
+        t = ax.text(lon + dx, lat + dy, name, fontsize=7.4, fontweight="medium", color=th["city"], zorder=6,
+                    path_effects=halo)
+        t.set_clip_path(clip_patch)
 
-    if not feats:
-        ax.text((LON_MIN + LON_MAX) / 2, LAT_MAX - 0.6, "Brak obszarów zagrożenia",
-                ha="center", va="center", fontsize=11, color=th["text"],
-                bbox=dict(boxstyle="round", fc=th["fig"], ec=th["frame"], alpha=0.92), zorder=7)
+    # ramka karty mapy (na wierzchu, ta sama zaokraglona krawedz)
+    ax.add_patch(PathPatch(clip, transform=ax.transData, fc="none", ec=th["frame"], lw=1.2, zorder=9))
 
-    # legenda z boku
-    lg = fig.add_axes([0.725, 0.075, 0.26, 0.80])
-    lg.set_xlim(0, 1)
+    # plakietka na mapie: najwyzszy poziom (albo brak zagrozen)
+    bx, by = LON_MIN + 0.45, LAT_MIN + 0.30
+    if feats:
+        label = f"Najwyższy poziom  {names[top]}"
+        dot = colors[top]
+    else:
+        label = "Brak obszarów zagrożenia"
+        dot = th["sub"]
+    ax.annotate("       " + label, xy=(bx, by), xytext=(0, 0), textcoords="offset points", fontsize=9.5,
+                fontweight="semibold", color=th["text"], va="center", ha="left", zorder=8, annotation_clip=False,
+                bbox=dict(boxstyle="round,pad=0.45,rounding_size=0.8", fc=th["fig"], ec=th["frame"], lw=0.9,
+                          alpha=0.95))
+    from matplotlib.transforms import offset_copy
+    ax.plot([bx], [by], "o", color=dot, markersize=7.5, zorder=8.5, markeredgecolor=th["fig"],
+            markeredgewidth=0.8, transform=offset_copy(ax.transData, fig=fig, x=7.5, y=0, units="points"))
+
+    # ---- legenda: poziome segmenty, jak na stronie
+    LG_H = 0.62
+    lg = fig.add_axes([fx(M), fy(map_y - 0.20 - LG_H), fx(MAP_W), fy(LG_H)])
+    lg.set_xlim(0, 6)
     lg.set_ylim(0, 1)
     lg.axis("off")
-    lg.text(0, 0.975, "Poziom zagrożenia", fontsize=10, fontweight="bold", va="top", color=th["text"])
-    present = {level_index(f["properties"].get("level", ""), names) for f in feats}
-    y = 0.90
-    for i in range(len(names) - 1, -1, -1):
+    for k, i in enumerate(range(len(names))):
+        x0 = k + 0.0
         face = th["none_swatch"] if i == 0 else colors[i]
-        lg.add_patch(Rectangle((0, y - 0.045), 0.16, 0.06, facecolor=face, edgecolor=th["poly_edge"],
-                               linewidth=0.7, alpha=0.95))
-        lg.text(0.21, y - 0.015, names[i], fontsize=8.5, va="center", color=th["text"],
-                fontweight="bold" if i in present else "normal")
-        lg.text(0.21, y - 0.055, LEVEL_DESC[i], fontsize=7, va="center", color=th["sub"])
-        y -= 0.115
-    lg.text(0, 0.19, "Poziom wynika z macierzy:\nprawdopodobieństwo (30 członków\nzespołu GEFS) × intensywność.",
-            fontsize=6.8, va="top", color=th["sub"])
+        on = (i in present) or (i == 0 and not feats)
+        lg.add_patch(FancyBboxPatch((x0 + 0.02, 0.70), 0.94, 0.20, boxstyle="round,pad=0,rounding_size=0.05",
+                                    fc=face, ec=th["poly_edge"] if i == 0 else "none", lw=0.6,
+                                    alpha=1.0 if on else 0.7, mutation_aspect=LG_H * 0.20 / (MAP_W / 6)))
+        lg.text(x0 + 0.02, 0.50, names[i], fontsize=9, fontweight="bold" if on else "medium",
+                color=th["text"] if on else th["sub"], va="center")
+        lg.text(x0 + 0.02, 0.22, LEVEL_DESC[i], fontsize=7.6, color=th["sub"] if on else th["foot"], va="center")
 
-    fig.text(0.012, 0.955, f"{title} — {day['label']}", fontsize=15, fontweight="bold",
-             va="center", color=th["text"])
-    fig.text(0.012, 0.915, f"Ważne: {fmt_day_range(day['valid_from'], day['valid_to'])} (czas polski)",
-             fontsize=9.5, color=th["sub"], va="center")
+    # ---- stopka
     run = parse_iso(swwf["model_run"])
     issued = parse_iso(swwf["issued"])
-    fig.text(0.012, 0.03,
-             f"Własna analiza zespołu GEFS (przebieg {run:%d.%m %H:%M}, wydano {issued:%d.%m %H:%M}). "
-             "To nie jest oficjalne ostrzeżenie IMGW.",
-             fontsize=7, color=th["foot"], va="center")
+    fig.text(fx(M), fy(0.36),
+             f"Własna analiza zespołu GEFS (30 członków) · przebieg {run:%d.%m %H:%M}, wydano {issued:%d.%m %H:%M}\n"
+             "Poziom wynika z macierzy: prawdopodobieństwo × intensywność. To nie jest oficjalne ostrzeżenie IMGW.",
+             fontsize=7.4, color=th["foot"], va="center", linespacing=1.5)
+    fig.text(FW and fx(FW - M), fy(0.36), "MeteoPanel", fontsize=10.5, fontweight="bold", family=head,
+             ha="right", va="center", color=th["sub"])
     fig.savefig(path, facecolor=th["fig"])
     plt.close(fig)
 
