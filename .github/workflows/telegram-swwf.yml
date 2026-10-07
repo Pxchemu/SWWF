@@ -50,6 +50,9 @@ jobs:
       - name: Zainstaluj biblioteki
         run: pip install matplotlib shapely requests
 
+      - name: Zainstaluj czcionki (Inter, Archivo - jak na stronie; tylko na czas dzialania, nie trafia do repo)
+        run: npm install --no-save --no-package-lock --silent @expo-google-fonts/inter @expo-google-fonts/archivo || echo "Bez czcionek - uzyje domyslnej"
+
       - name: Narysuj mapy i wyslij
         run: python swwf_telegram.py --out-dir swwf_maps
 
