@@ -2,21 +2,23 @@
 Historyczna ekstrakcja GEFS dla stacji IMGW — surowy materiał do KALIBRACJI SWWF na obserwacjach.
 
 Dla jednego przebiegu GEFS (30 członków) zapisuje, dla każdej stacji z `stations_imgw.csv`,
-w każdym oknie 6 h (0-6, 6-12, ... 66-72 h) SUROWE pola, z których SWWF liczy swoje hazardy:
-opad (APCP), T2m i porywy (na końcu i w połowie okna), CPOFP, CFRZR, VIS, SNOD, CAPE.
+w każdym oknie 6 h (0-6, 6-12, ... 72-78 h) SUROWE pola, z których SWWF liczy swoje hazardy:
+opad (APCP), T2m, porywy, wiatr 10 m (U, V) i wilgotność 2 m (na końcu i w połowie okna),
+CPOFP, CFRZR, VIS, SNOD, CAPE. (Wiatr średni i wilgotność pozwalają policzyć standardowy
+wind chill oraz temperaturę mokrego termometru jako lepszą decyzję deszcz/śnieg.)
 Dzięki temu poziomy zagrożenia, progi, przelicznik śniegu i okno doby (06-06 UTC vs 00-24 UTC)
 można zmieniać OFFLINE, bez ponownego pobierania — tylko raz pobieramy dane.
 
 Użycie (zwykle przez workflow hindcast.yml):
     python hindcast_points.py extract "2021-01-03 00" 1 10      # przebieg, członkowie od-do (włącznie)
-    python hindcast_points.py merge hindcast_chunks/ hindcast/  # scala kawałki w jeden plik na przebieg
+    python hindcast_points.py merge hindcast_chunks/ hindcast_v2/  # scala kawałki w jeden plik na przebieg
 
 Wynik extract: {outdir}/chunk_{RRRR-MM-DD_GG}_m{od}-{do}.json.gz
-Wynik merge:   hindcast/{RRRR-MM-DD_GGz}.json.gz — struktura:
+Wynik merge:   hindcast_v2/{RRRR-MM-DD_GGz}.json.gz — struktura (v2: 13 okien do 78 h + wiatr i wilgotność; starsze pliki w hindcast/ mają 12 okien):
     {"run", "windows": [[0,6],...], "stations": [{code,name,lat,lon,grid_lat,grid_lon,flag}],
      "members": [1..30], "fields": {pole: opis},
      "data": {pole: [członek][stacja][okno] (lub null)}, "missing": {...}}
-Jednostki: apcp mm (suma okna), t_end/t_mid °C, gust_* m/s, cpofp_end % (-50 = brak),
+Jednostki: apcp mm (suma okna), t_end/t_mid °C, gust_* i u10/v10 m/s, rh_* %, cpofp_end % (-50 = brak),
 cfrzr_end 0/1, vis_end m, snod_end m, cape_end J/kg.
 
 Wymaga: pip install herbie-data (jak generate_swwf.py).
@@ -32,7 +34,7 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIONS_CSV = os.path.join(HERE, "stations_imgw.csv")
-WINDOWS = [(s, s + 6) for s in range(0, 72, 6)]      # 12 okien 6 h = 72 h
+WINDOWS = [(s, s + 6) for s in range(0, 78, 6)]      # 13 okien 6 h = 78 h (okno 06-06 UTC doby +2 potrzebuje 72-78 h)
 ESSENTIAL = ("apcp", "t_end")                         # bez nich członek się nie liczy
 FIELDS = {
     "apcp": "opad w oknie [mm]",
@@ -45,6 +47,12 @@ FIELDS = {
     "vis_end": "widzialność na końcu okna [m]",
     "snod_end": "wysokość pokrywy śnieżnej (model) [m]",
     "cape_end": "CAPE na końcu okna [J/kg]",
+    "u10_end": "składowa U wiatru 10 m na końcu okna [m/s]",
+    "v10_end": "składowa V wiatru 10 m na końcu okna [m/s]",
+    "u10_mid": "składowa U wiatru 10 m w połowie okna [m/s]",
+    "v10_mid": "składowa V wiatru 10 m w połowie okna [m/s]",
+    "rh_end": "wilgotność względna 2 m na końcu okna [%]",
+    "rh_mid": "wilgotność względna 2 m w połowie okna [%]",
 }
 
 
@@ -171,6 +179,12 @@ def extract(run, m_from, m_to, outdir):
                 optional("vis_end", end, ":VIS:surface:")
                 optional("snod_end", end, ":SNOD:surface:")
                 optional("cape_end", end, ":CAPE:surface:")
+                optional("u10_end", end, ":UGRD:10 m above ground:")
+                optional("v10_end", end, ":VGRD:10 m above ground:")
+                optional("u10_mid", mid, ":UGRD:10 m above ground:")
+                optional("v10_mid", mid, ":VGRD:10 m above ground:")
+                optional("rh_end", end, ":RH:2 m above ground:")
+                optional("rh_mid", mid, ":RH:2 m above ground:")
         except Exception as e:
             member_ok = False
             print(f"  człon {m:>2}: BŁĄD ({e})", flush=True)
