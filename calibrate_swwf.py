@@ -111,9 +111,9 @@ def clipf(x):
 def phase_variants(have_rh):
     """Funkcje (te, tm, cp, rhe, rhm) -> frakcja opadu zamarzniętego (0..1) w oknie."""
     v = {
-        "A obecna: CPOFP (gdy ważny), inaczej T końca okna (1@0C->0@2C)":
+        "A dawna: CPOFP (gdy ważny), inaczej T końca okna (1@0C->0@2C)":
             lambda te, tm, cp, rhe, rhm: np.where(np.isfinite(cp) & (cp >= 0), np.minimum(cp / 100, 1), clipf((2.0 - te) / 2.0)),
-        "D: T = zimniejsza z 2 próbek (1@1C->0@3C)":
+        "D obecna (produkcja): T = zimniejsza z 2 próbek (1@1C->0@3C)":
             lambda te, tm, cp, rhe, rhm: clipf((3.0 - np.minimum(te, tm)) / 2.0),
         "G: CPOFP (gdy ważny), inaczej D":
             lambda te, tm, cp, rhe, rhm: np.where(np.isfinite(cp) & (cp >= 0), np.minimum(cp / 100, 1), clipf((3.0 - np.minimum(te, tm)) / 2.0)),
@@ -279,8 +279,8 @@ def section_snow(runs, obs):
                 row.append((pod, far, csi))
             pr = (SW[ok & rain] >= 3).mean(axis=1) if (ok & rain).sum() else np.array([0.0])
             say(f"| {name} | {row[0][0]:.2f} | {row[0][1]:.2f} | {row[0][2]:.2f} | {row[1][0]:.2f} | {row[1][1]:.2f} | {(pr >= 0.3).mean() * 100:.0f}% |")
-        best = list(variants)[0]
-        say(f"- wiarygodność P(śnieg>=3 mm), metoda '{best[:1]}': " + reliability((s.M[best][ok] >= 3).mean(axis=1), snow[ok] >= 3))
+        best = next(n for n in variants if n.startswith('D'))
+        say(f"- wiarygodność P(śnieg>=3 mm), metoda '{best[:1]}' (produkcyjna): " + reliability((s.M[best][ok] >= 3).mean(axis=1), snow[ok] >= 3))
     say()
 
 
@@ -307,7 +307,7 @@ def section_cold(runs, obs):
         say(f"- prognoza min. T powietrza: błąd średni {np.mean(air.mean(axis=1) - TM):+.2f} C, MAE {np.mean(abs(air.mean(axis=1) - TM)):.2f} C; "
             f"w mroźnych dniach (obs <= -10 C): błąd {np.mean(air.mean(axis=1)[TM <= -10] - TM[TM <= -10]):+.2f} C" if (TM <= -10).any() else
             f"- prognoza min. T powietrza: błąd średni {np.mean(air.mean(axis=1) - TM):+.2f} C, MAE {np.mean(abs(air.mean(axis=1) - TM)):.2f} C")
-        for key, label in (("feels_gust", "odczuwalna z PORYWÓW (obecna)"), ("feels_mean", "odczuwalna z wiatru ŚREDNIEGO")):
+        for key, label in (("feels_gust", "odczuwalna z PORYWÓW (dawna wersja hazardu; produkcja używa T powietrza)"), ("feels_mean", "odczuwalna z wiatru ŚREDNIEGO")):
             if key in s.M:
                 say(f"- {label}: chłodniejsza od powietrza średnio o {np.mean(air.mean(axis=1) - s.M[key][ok].mean(axis=1)):.1f} C")
         for thr in (-5, -10, -15, -20):
@@ -370,11 +370,63 @@ def section_blizzard(runs, obs):
     say()
 
 
+def section_quiet(runs, obs, label):
+    """Fałszywe alarmy w przebiegach bez zjawisk: ile stacjodni i ile dni daje alarm, gdy nic się nie wydarzyło."""
+    say(f"## 6. Fałszywe alarmy — {label}")
+    say("Alarm = P(zdarzenia) >= 30% wg zespołu. Fałszywy = alarm bez zdarzenia na stacji. 'dni z >=3 stacjami' = liczba dób, w których "
+        "fałszywy alarm miało co najmniej 3 stacje naraz (tyle widziałby użytkownik jako obszar).")
+    def snow_extra(A, w):
+        ap = A["apcp"][:, :, w]; te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
+        return {"v": (ap * clipf((3.0 - np.minimum(te, tm)) / 2.0)).sum(axis=2)}
+    def cold_extra(A, w):
+        return {"v": np.minimum(np.nanmin(A["t_end"][:, :, w], axis=2), np.nanmin(A["t_mid"][:, :, w], axis=2))}
+    def precip_extra(A, w):
+        return {"v": A["apcp"][:, :, w].sum(axis=2)}
+    def blizz_extra(A, w):
+        g = A["gust_end"][:, :, w]; ap = A["apcp"][:, :, w]
+        snod = np.nan_to_num(A["snod_end"][:, :, w], nan=0.0) * 100.0
+        return {"v": ((g >= GUST_BLIZZARD_MS) & ((ap >= 0.05) | (snod >= 5.0))).any(axis=2).astype(float)}
+    def snow_obs(s):
+        O = s.obs("SMDB"); return np.where(s.roop() == "S", O, 0.0)
+    specs = [
+        ("śnieg >= 3 mm", 6, snow_extra, snow_obs, lambda v: (v >= 3).mean(axis=1), lambda o: o >= 3),
+        ("opad >= 10 mm", 6, precip_extra, lambda s: s.obs("SMDB"), lambda v: (v >= 10).mean(axis=1), lambda o: o >= 10),
+        ("mróz TMIN <= -10 C", 0, cold_extra, lambda s: s.obs("TMIN"), lambda v: (v <= -10).mean(axis=1), lambda o: o <= -10),
+        ("mróz TMIN <= -15 C", 0, cold_extra, lambda s: s.obs("TMIN"), lambda v: (v <= -15).mean(axis=1), lambda o: o <= -15),
+        ("zamieć (porywy >= 15.5 m/s + śnieg, bez VIS)", 6, blizz_extra, lambda s: s.obs("ZMNI") + s.obs("ZMWS"),
+         lambda v: v.mean(axis=1), lambda o: o >= 1),
+    ]
+    for k in (0, 1, 2):
+        say(f"### wyprzedzenie k={k}")
+        for name, shift, extra, obsfn, pfun, evfun in specs:
+            n_sd = n_alarm = n_false = n_hit = n_days = n_run_days = 0
+            for R in sorted(runs):
+                s = build_sample({R: runs[R]}, obs, k, shift, extra)
+                if s.n == 0:
+                    continue
+                o = obsfn(s); ok = np.isfinite(o)
+                if not ok.any():
+                    continue
+                al = pfun(s.M["v"][ok]) >= 0.3; ev = evfun(o[ok])
+                n_run_days += 1
+                n_sd += int(ok.sum()); n_alarm += int(al.sum()); n_hit += int((al & ev).sum())
+                f = int((al & ~ev).sum()); n_false += f
+                n_days += int(f >= 3)
+            if n_sd == 0:
+                continue
+            say(f"- {name}: stacjodni {n_sd}, alarmów {n_alarm} (trafnych {n_hit}, fałszywych {n_false} = {n_false / n_sd * 1000:.1f} na 1000 stacjodni); "
+                f"dni z >=3 stacjami fałszywymi: {n_days} z {n_run_days}")
+    say()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hindcast", default="hindcast_v2")
     ap.add_argument("--obs", default=None)
     ap.add_argument("--out", default="reports/calibration_report.md")
+    ap.add_argument("--quiet-list", default=None,
+                    help="plik z datami przebiegów 'bez zjawisk' (dowolny tekst z datami RRRR-MM-DD; np. clim_runs.txt). "
+                         "Włącza podział raportu na dni spokojne i dni ze zdarzeniami oraz sekcję 6 (fałszywe alarmy).")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     hd = a.hindcast if os.path.isabs(a.hindcast) else os.path.join(here, a.hindcast)
@@ -392,7 +444,22 @@ def main():
     obs = load_obs(obs_path)
     say(f"# Kalibracja SWWF na obserwacjach IMGW — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     say(f"hindcast: {hd} ({len(runs)} przebiegów 00Z z 30 członkami, okien na przebieg: {sorted({r['nwin'] for r in runs.values()})}); obs: {os.path.basename(obs_path)} ({len(obs)} stacjodni)")
-    say("Próba jest dobrana pod zdarzenia (nie klimatologiczna) — FAR i odsetki dni zdarzeń nie są częstościami klimatologicznymi.")
+    quiet_dates = set()
+    ql = a.quiet_list
+    if ql:
+        qp = ql if os.path.isabs(ql) else os.path.join(here, ql)
+        if os.path.exists(qp):
+            import re
+            quiet_dates = {date.fromisoformat(m) for m in re.findall(r"\d{4}-\d{2}-\d{2}", open(qp, encoding="utf-8").read())}
+        else:
+            say(f"(UWAGA: nie znaleziono {ql} — raport bez podziału na dni spokojne)")
+    quiet = {d: r for d, r in runs.items() if d in quiet_dates}
+    events = {d: r for d, r in runs.items() if d not in quiet_dates}
+    if quiet:
+        say(f"Podział przebiegów wg {ql}: dni BEZ zjawisk: {len(quiet)}, pozostałe (dobrane pod zdarzenia): {len(events)}. "
+            "Sekcje 0-5 poniżej dotyczą WSZYSTKICH przebiegów (próba mieszana); sekcja 6 — rozbicie.")
+    else:
+        say("Próba jest dobrana pod zdarzenia (nie klimatologiczna) — FAR i odsetki dni zdarzeń nie są częstościami klimatologicznymi.")
     say()
     section_alignment(runs, obs)
     section_precip(runs, obs)
@@ -400,6 +467,10 @@ def main():
     section_cold(runs, obs)
     section_ice(runs, obs)
     section_blizzard(runs, obs)
+    if quiet:
+        section_quiet(quiet, obs, f"przebiegi BEZ zjawisk ({len(quiet)})")
+        if events:
+            section_quiet(events, obs, f"przebiegi ze zdarzeniami ({len(events)}) — dla porównania")
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
