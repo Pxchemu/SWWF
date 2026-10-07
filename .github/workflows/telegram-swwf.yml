@@ -1,0 +1,67 @@
+name: Telegram - wyslij prognoze SWWF
+
+on:
+  # automatycznie po kazdym udanym wygenerowaniu prognozy
+  workflow_run:
+    workflows: ["SWWF - generuj prognoze"]
+    types: [completed]
+  # recznie: test lub wymuszenie wysylki
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Wyslij niezaleznie od tego, czy cos sie zmienilo (test)'
+        type: boolean
+        default: true
+      hazard:
+        description: 'Hazard na mapach (general_winter_risk, snow_24h_cm, cold_min_t2m_c, ice_freezing_rain, blizzard, snow_squalls, precip_24h_mm = test w sezonie bez zimy)'
+        required: false
+        default: 'general_winter_risk'
+
+permissions:
+  contents: write
+
+# jedna wysylka naraz (stan telegram_state.json jest wspolny)
+concurrency:
+  group: telegram-swwf
+  cancel-in-progress: false
+
+jobs:
+  send:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+      TG_HAZARD: ${{ inputs.hazard }}
+      TG_FORCE: ${{ inputs.force && '1' || '' }}
+      TG_LINK: ${{ vars.TELEGRAM_LINK }}
+    steps:
+      - name: Pobierz zawartosc repo (najnowszy main, z swiezym swwf.json)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install matplotlib shapely requests
+
+      - name: Narysuj mapy i wyslij
+        run: python swwf_telegram.py --out-dir swwf_maps
+
+      - name: Zapisz stan wysylki
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add telegram_state.json
+          git diff --staged --quiet && exit 0
+          git commit -m "Stan wysylki Telegram"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
