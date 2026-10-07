@@ -591,8 +591,63 @@ def section_snow_ratio(obs):
         sel = (T > lo) & (T <= hi)
         if sel.sum() >= 15:
             q = np.percentile(R[sel], [25, 50, 75])
-            lab = f"T śr. {lo if lo > -99 else '<'}..{hi if hi < 99 else '>'}".replace("0.01", "0")
+            lab = ("T śr. < " + f"{hi:g}" if lo <= -99 else ("T śr. > 0" if hi >= 99 else f"T śr. {lo:g}..{hi:g}")).replace("0.01", "0")
             say(f"- {lab} C: n={int(sel.sum())}, mediana {q[1]:.1f} cm/mm (kwartyle {q[0]:.1f}-{q[2]:.1f}); produkcja używa {prod / 10:.1f} cm/mm ({prod:.0f}:1)")
+    say()
+
+
+def snow_ratio_prod(t):
+    """Jak snow_density_ratio w generate_swwf.py (T na końcu okna)."""
+    return np.where(t <= -10, 15.0, np.where(t <= -5, 12.0, np.where(t <= 0, 10.0, 7.0)))
+
+
+def section_snow_cm(runs, obs):
+    """Test koniec-do-końca: PROGNOZOWANE cm śniegu (dokładnie wzór produkcyjny: opad * frakcja zamarznięta / 10 * przelicznik)
+    vs OBSERWOWANY przyrost pokrywy PKSN (cm) w dobie. To jest liczba, którą widzi użytkownik."""
+    say("## 10. Śnieg w cm — prognoza produkcyjna vs przyrost pokrywy śnieżnej (PKSN D - PKSN D-1)")
+    say("Prognoza = suma po 4 oknach: opad * frakcja zamarznięta (wariant D) / 10 * przelicznik (15/12/10/7 z T na końcu okna), skala g mnoży cm. "
+        "Zdarzenie = przyrost pokrywy >= X cm. UWAGA: przyrost pokrywy to DOLNE oszacowanie świeżego śniegu (osiadanie, topnienie, zawianie), "
+        "więc 'obs/prog.' < 1 częściowo wynika z samego pomiaru; interpretować porównawczo (czy g poprawia CSI), nie jako dokładny współczynnik.")
+    def extra(A, w):
+        ap = A["apcp"][:, :, w]; te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
+        fz = clipf((3.0 - np.minimum(te, tm)) / 2.0)
+        return {"cm": (ap * fz / 10.0 * snow_ratio_prod(te)).sum(axis=2)}
+    for k in (0, 1, 2):
+        s = build_sample(runs, obs, k, 6, extra)
+        if s.n == 0:
+            continue
+        dpk = np.full(s.n, np.nan)
+        for i, m in enumerate(s.meta):
+            pk = s.o[i].get("PKSN", np.nan); prev = obs.get((m[2], m[1] - timedelta(days=1)))
+            if prev is not None and np.isfinite(pk) and np.isfinite(prev.get("PKSN", np.nan)):
+                dpk[i] = pk - prev["PKSN"]
+        ok = np.isfinite(dpk)
+        if ok.sum() < 50:
+            say(f"### wyprzedzenie k={k}: za mało dób z PKSN (n={int(ok.sum())})")
+            continue
+        V = s.M["cm"][ok]; O = np.maximum(dpk[ok], 0.0)
+        rid = np.array([m[0].toordinal() for m, g in zip(s.meta, ok) if g])
+        mean = V.mean(axis=1)
+        say(f"### wyprzedzenie k={k}: n={int(ok.sum())}")
+        row = []
+        for lo, hi, lab in ((1, 3, "1-3 cm"), (3, 6, "3-6 cm"), (6, 10, "6-10 cm"), (10, 999, ">10 cm")):
+            sel = (mean >= lo) & (mean < hi)
+            if sel.sum() >= 15:
+                row.append(f"{lab}: n={int(sel.sum())}, śr. prog. {mean[sel].mean():.1f} cm, śr. obs {O[sel].mean():.1f} cm (obs/prog. = {O[sel].mean() / mean[sel].mean():.2f})")
+        say("- wg przedziałów prognozy (średnia zespołu): " + " | ".join(row))
+        for thr in (5, 10):
+            ev = O >= thr
+            if ev.sum() < 10:
+                continue
+            nev = {r: int(ev[rid == r].sum()) for r in np.unique(rid)}
+            free = np.array([nev[r] <= 1 for r in rid])
+            say(f"- próg {thr} cm (zdarzeń {int(ev.sum())}):")
+            for g in (1.0, 0.8, 0.6, 0.5):
+                for pthr in (0.3, 0.5):
+                    p = (V * g >= thr).mean(axis=1)
+                    h, fa, m_, pod, far, csi = contingency(p, ev, pthr)
+                    ff = int(((p >= pthr) & ~ev & free).sum())
+                    say(f"    g={g:.1f}, alarm przy P>={int(pthr * 100)}%: POD {pod:.2f}, FAR {far:.2f}, CSI {csi:.2f}, fałszywych {fa}; na dobach bez zdarzenia {ff / max(int(free.sum()), 1) * 1000:.1f} na 1000 stacjodni")
     say()
 
 
@@ -631,6 +686,7 @@ def main():
     section_cold_bias(runs, obs)
     section_snow_cal(runs, obs)
     section_snow_ratio(obs)
+    section_snow_cm(runs, obs)
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
