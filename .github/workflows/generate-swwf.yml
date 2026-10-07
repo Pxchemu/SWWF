@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write
 
+# czekanie na przebieg wydluza job - nie pozwalamy, by dwa przebiegi liczyly sie naraz
+concurrency:
+  group: swwf-generate
+  cancel-in-progress: false
+
 jobs:
   generate:
     runs-on: ubuntu-latest
@@ -30,6 +35,10 @@ jobs:
         run: pip install herbie-data matplotlib geojsoncontour scipy shapely
 
       - name: Wygeneruj swwf.json
+        env:
+          # o 05:00 UTC przebieg 00z bywa jeszcze niekompletny na AWS (fxx=72) - zamiast cofac
+          # sie na 18z (i tracic archiwum 00z potrzebne do weryfikacji opadu) czekamy do 90 min
+          SWWF_WAIT_MINUTES: "90"
         run: python generate_swwf.py
 
       - name: Zapisz wynik z powrotem do repo
