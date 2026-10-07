@@ -156,10 +156,11 @@ def reliability(pf, ev):
 class Sample:
     """Wektory per-stacjodzień: obserwacje + wielkości członków."""
     def __init__(self):
-        self.o, self.m = [], {}
+        self.o, self.m, self.meta = [], {}, []
 
-    def add(self, o, member_vals):
+    def add(self, o, member_vals, meta=None):
         self.o.append(o)
+        self.meta.append(meta)
         for k, v in member_vals.items():
             self.m.setdefault(k, []).append(v)
 
@@ -191,7 +192,8 @@ def build_sample(runs, obs, k, shift, extra):
             o = obs.get((st["code"], D))
             if o is None:
                 continue
-            s.add(o, {key: v[:, i] if v.ndim == 2 else v for key, v in vals.items()})
+            s.add(o, {key: v[:, i] if v.ndim == 2 else v for key, v in vals.items()},
+                  (R, D, st.get("code"), st.get("name", st.get("code")), st.get("lat"), st.get("lon")))
     return s.finalize()
 
 
@@ -337,7 +339,8 @@ def section_ice(runs, obs):
 
 
 def section_blizzard(runs, obs):
-    say("## 5. Zamieć — definicja SWWF (porywy >= 15.5 m/s, widzialność <= 400 m, śnieg świeży/leżący) vs obserwowane godziny zamieci śnieżnej (ZMNI+ZMWS)")
+    say("## 5. Zamieć (gwałtowny wiatr + widzialność) — UWAGA: to NIE jest produkcyjny hazard Snow Squalls (CAPE + opad zamarznięty, nieweryfikowalny obserwacjami IMGW); sekcja sprawdza wycofany hazard BLIZZARD")
+    say("## 5 (opis). Zamieć — definicja SWWF (porywy >= 15.5 m/s, widzialność <= 400 m, śnieg świeży/leżący) vs obserwowane godziny zamieci śnieżnej (ZMNI+ZMWS)")
     say("Uwaga: przebiegi bez pola widzialności (GEFS 2021) nie mogą dać flagi wg definicji SWWF, więc są z tej oceny wyłączone; "
         "wariant 'bez VIS' (porywy + śnieg) działa na wszystkich.")
     def extra(A, w):
@@ -427,6 +430,79 @@ def section_quiet(runs, obs):
     say()
 
 
+def section_cold_bias(runs, obs):
+    """Skad bierze sie niedoszacowanie ogona zimna: zaleznosc bledu od prognozowanej temperatury, rozrzut zespolu,
+    rozrzut miedzy stacjami (teren?) oraz prosta korekta oceniana krzyzowo (leave-one-run-out)."""
+    say("## 7. Mróz — diagnoza niedoszacowania ogona zimna i test prostej korekty (TMIN, doba 00-24 UTC)")
+    say("Błąd = obserwacja - prognoza (średnia zespołu min. T powietrza); dodatni = w rzeczywistości zimniej niż w prognozie. "
+        "Przedziały wg PROGNOZY (wersja użyteczna do korekty; przedziały wg obserwacji zawyżają błąd przez regresję do średniej).")
+    def extra(A, w):
+        te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
+        return {"air": np.minimum(np.nanmin(te, axis=2), np.nanmin(tm, axis=2))}
+    bins = [(-99, -15, "prog. < -15"), (-15, -10, "-15..-10"), (-10, -5, "-10..-5"), (-5, 0, "-5..0"), (0, 99, "> 0")]
+    for k in (0, 1, 2):
+        s = build_sample(runs, obs, k, 0, extra)
+        if s.n == 0:
+            continue
+        TM = s.obs("TMIN"); ok = np.isfinite(TM)
+        air = s.M["air"][ok]; TM = TM[ok]; meta = [m for m, g in zip(s.meta, ok) if g]
+        mean = air.mean(axis=1); sd = air.std(axis=1); err = TM - mean
+        say(f"### wyprzedzenie k={k}: n={len(TM)}")
+        row = []
+        for lo, hi, lab in bins:
+            sel = (mean >= lo) & (mean < hi)
+            if sel.sum() >= 10:
+                row.append(f"{lab}: n={int(sel.sum())}, błąd {err[sel].mean():+.2f} C (mediana {np.median(err[sel]):+.2f})")
+        say("- błąd wg przedziałów prognozy: " + " | ".join(row))
+        cold = mean <= -5
+        say(f"- rozrzut zespołu (średnie odch. std) {sd.mean():.2f} C vs RMSE średniej zespołu {np.sqrt(np.mean(err ** 2)):.2f} C; "
+            f"dla prognoz <= -5 C: rozrzut {sd[cold].mean():.2f} C vs RMSE {np.sqrt(np.mean(err[cold] ** 2)):.2f} C")
+        below = TM < air.min(axis=1)
+        say(f"- obserwacja zimniejsza niż WSZYSTKIE 30 członków: {below.mean() * 100:.1f}% stacjodni (przy dobrze rozproszonym zespole ~3%); "
+            f"dla prognoz <= -5 C: {below[cold].mean() * 100:.1f}%")
+        # rozrzut miedzy stacjami (czy blad zalezy od stacji = teren)
+        st = {}
+        for e, m, c in zip(err, meta, cold):
+            if c:
+                st.setdefault(m[2], dict(name=m[3], lat=m[4], lon=m[5], e=[]))["e"].append(e)
+        rows = [(np.mean(v["e"]), len(v["e"]), v["name"], v["lat"], v["lon"]) for v in st.values() if len(v["e"]) >= 8]
+        if len(rows) >= 6:
+            rows.sort()
+            allm = np.array([r[0] for r in rows])
+            say(f"- błąd na dniach z prognozą <= -5 C wg stacji (n stacji={len(rows)}): średnia {allm.mean():+.2f} C, "
+                f"rozrzut między stacjami (std) {allm.std():.2f} C")
+            say("    najmniejszy błąd: " + ", ".join(f"{r[2]} {r[0]:+.1f}" for r in rows[:5]))
+            say("    największy błąd: " + ", ".join(f"{r[2]} {r[0]:+.1f}" for r in rows[-6:]))
+            lats = np.array([r[3] for r in rows if r[3] is not None], dtype=float)
+            lons = np.array([r[4] for r in rows if r[4] is not None], dtype=float)
+            if len(lats) == len(rows):
+                say(f"    korelacja błędu stacji z szerokością: {np.corrcoef(lats, allm)[0, 1]:+.2f}, z długością: {np.corrcoef(lons, allm)[0, 1]:+.2f}")
+        # korekta liniowa po prognozie (obs ~ a + b*mean dla prognoz <= 2 C), ocena leave-one-run-out
+        runs_id = np.array([m[0].toordinal() for m in meta])
+        shift = np.zeros_like(mean)
+        for r in np.unique(runs_id):
+            tr = (runs_id != r) & (mean <= 2)
+            if tr.sum() < 100:
+                continue
+            b, a = np.polyfit(mean[tr], TM[tr], 1)
+            te_ = (runs_id == r) & (mean <= 2)
+            shift[te_] = (a + b * mean[te_]) - mean[te_]
+        corr_air = air + shift[:, None]
+        cm = corr_air.mean(axis=1)
+        say(f"- korekta liniowa po prognozie (dopasowanie na pozostałych przebiegach, ocena na pominiętym): "
+            f"MAE {np.mean(abs(mean - TM)):.2f} -> {np.mean(abs(cm - TM)):.2f} C; błąd średni {np.mean(TM - mean):+.2f} -> {np.mean(TM - cm):+.2f} C; "
+            f"średnie przesunięcie dla prognoz <= -10 C: {shift[mean <= -10].mean() if (mean <= -10).any() else 0:+.2f} C")
+        for thr in (-5, -10, -15):
+            ev = TM <= thr
+            if ev.sum() < 5:
+                continue
+            a0 = contingency((air <= thr).mean(axis=1), ev, 0.3)
+            a1 = contingency((corr_air <= thr).mean(axis=1), ev, 0.3)
+            say(f"- próg {thr} C, P>=30%: przed: POD {a0[3]:.2f}, FAR {a0[4]:.2f}, CSI {a0[5]:.2f} (fałszywych {a0[1]}) | "
+                f"po korekcie: POD {a1[3]:.2f}, FAR {a1[4]:.2f}, CSI {a1[5]:.2f} (fałszywych {a1[1]})")
+    say()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hindcast", default="hindcast_v2")
@@ -459,6 +535,7 @@ def main():
     section_ice(runs, obs)
     section_blizzard(runs, obs)
     section_quiet(runs, obs)
+    section_cold_bias(runs, obs)
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
