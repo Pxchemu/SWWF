@@ -521,6 +521,45 @@ def section_cold_bias(runs, obs):
     say()
 
 
+def section_snow_cal(runs, obs):
+    """Śnieg: czy skalowanie ilości (mokry bias GEFS) i/lub próg alarmu P poprawia wynik; oceniane na dobach ze zdarzeniem i bez."""
+    say("## 8. Śnieg — test skalowania ilości opadu zamarzniętego (wariant D) i progu alarmu")
+    say("Skala f mnoży opad zamarznięty każdego członka (f=1,0 = obecna produkcja). Zdarzenie = obserwowany opad rodzaju S >= X mm (SMDB). "
+        "Doby bez zdarzenia = zdarzenie na <= 1 stacji. Uwaga: to ilość WODY (mm), nie centymetry śniegu — przelicznik śnieg:woda jest osobną sprawą.")
+    def extra(A, w):
+        ap = A["apcp"][:, :, w]; te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
+        return {"v": (ap * clipf((3.0 - np.minimum(te, tm)) / 2.0)).sum(axis=2)}
+    for k in (0, 1, 2):
+        s = build_sample(runs, obs, k, 6, extra)
+        if s.n == 0:
+            continue
+        O = s.obs("SMDB"); T = s.roop(); ok = np.isfinite(O)
+        snow = np.where(T == "S", O, 0.0)[ok]; V = s.M["v"][ok]
+        meta = [m for m, g in zip(s.meta, ok) if g]; rid = np.array([m[0].toordinal() for m in meta])
+        mean = V.mean(axis=1)
+        say(f"### wyprzedzenie k={k}: n={int(ok.sum())}")
+        row = []
+        for lo, hi, lab in ((0.5, 1, "0,5-1 mm"), (1, 3, "1-3 mm"), (3, 6, "3-6 mm"), (6, 999, ">6 mm")):
+            sel = (mean >= lo) & (mean < hi)
+            if sel.sum() >= 15:
+                row.append(f"{lab}: n={int(sel.sum())}, obs/prog. = {snow[sel].mean() / mean[sel].mean():.2f}")
+        say("- stosunek średniej obserwowanego śniegu (mm) do średniej prognozy wg przedziałów prognozy: " + " | ".join(row))
+        for thr in (3, 5):
+            ev = snow >= thr
+            if ev.sum() < 10:
+                continue
+            nev = {r: int(ev[rid == r].sum()) for r in np.unique(rid)}
+            free = np.array([nev[r] <= 1 for r in rid])
+            say(f"- próg {thr} mm:")
+            for f in (1.0, 0.9, 0.8, 0.7, 0.6):
+                for pthr in (0.3, 0.5):
+                    p = (V * f >= thr).mean(axis=1)
+                    h, fa, m, pod, far, csi = contingency(p, ev, pthr)
+                    ff = int(((p >= pthr) & ~ev & free).sum())
+                    say(f"    f={f:.1f}, alarm przy P>={int(pthr * 100)}%: POD {pod:.2f}, FAR {far:.2f}, CSI {csi:.2f}, fałszywych {fa}; na dobach bez zdarzenia {ff / max(int(free.sum()), 1) * 1000:.1f} na 1000 stacjodni")
+    say()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hindcast", default="hindcast_v2")
@@ -554,6 +593,7 @@ def main():
     section_blizzard(runs, obs)
     section_quiet(runs, obs)
     section_cold_bias(runs, obs)
+    section_snow_cal(runs, obs)
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
