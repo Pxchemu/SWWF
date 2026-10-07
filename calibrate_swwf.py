@@ -38,6 +38,7 @@ OBS_COLS = ("NSP POST ROK MC DZ TMAX WTMAX TMIN WTMIN STD WSTD TMNG WTMNG SMDB W
 assert len(OBS_COLS) == 65
 NUMERIC = ("TMAX", "TMIN", "STD", "SMDB", "PKSN", "SNEG", "GOLO", "ZMNI", "ZMWS", "FF10", "FF15")
 GUST_BLIZZARD_MS = 15.5
+COLD_AIR_BIAS_PROD = -1.0          # korekta produkcyjna z generate_swwf.py (COLD_AIR_BIAS_C)
 VIS_BLIZZARD_M = 400.0
 OUT = []
 
@@ -434,7 +435,7 @@ def section_cold_bias(runs, obs):
     """Skad bierze sie niedoszacowanie ogona zimna: zaleznosc bledu od prognozowanej temperatury, rozrzut zespolu,
     rozrzut miedzy stacjami (teren?) oraz prosta korekta oceniana krzyzowo (leave-one-run-out)."""
     say("## 7. Mróz — diagnoza niedoszacowania ogona zimna i test prostej korekty (TMIN, doba 00-24 UTC)")
-    say("Błąd = obserwacja - prognoza (średnia zespołu min. T powietrza); dodatni = w rzeczywistości zimniej niż w prognozie. "
+    say("Błąd = obserwacja - prognoza (średnia zespołu min. T powietrza); UJEMNY = w rzeczywistości zimniej niż w prognozie (prognoza za ciepła). "
         "Przedziały wg PROGNOZY (wersja użyteczna do korekty; przedziały wg obserwacji zawyżają błąd przez regresję do średniej).")
     def extra(A, w):
         te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
@@ -477,29 +478,46 @@ def section_cold_bias(runs, obs):
             lons = np.array([r[4] for r in rows if r[4] is not None], dtype=float)
             if len(lats) == len(rows):
                 say(f"    korelacja błędu stacji z szerokością: {np.corrcoef(lats, allm)[0, 1]:+.2f}, z długością: {np.corrcoef(lons, allm)[0, 1]:+.2f}")
-        # korekta liniowa po prognozie (obs ~ a + b*mean dla prognoz <= 2 C), ocena leave-one-run-out
+        # warianty korekty, oceniane leave-one-run-out (parametry z pozostałych przebiegów, ocena na pominiętym)
         runs_id = np.array([m[0].toordinal() for m in meta])
-        shift = np.zeros_like(mean)
+        shift = np.zeros_like(mean); sigma = np.full_like(mean, np.nan)
         for r in np.unique(runs_id):
             tr = (runs_id != r) & (mean <= 2)
             if tr.sum() < 100:
                 continue
-            b, a = np.polyfit(mean[tr], TM[tr], 1)
-            te_ = (runs_id == r) & (mean <= 2)
-            shift[te_] = (a + b * mean[te_]) - mean[te_]
-        corr_air = air + shift[:, None]
-        cm = corr_air.mean(axis=1)
-        say(f"- korekta liniowa po prognozie (dopasowanie na pozostałych przebiegach, ocena na pominiętym): "
-            f"MAE {np.mean(abs(mean - TM)):.2f} -> {np.mean(abs(cm - TM)):.2f} C; błąd średni {np.mean(TM - mean):+.2f} -> {np.mean(TM - cm):+.2f} C; "
-            f"średnie przesunięcie dla prognoz <= -10 C: {shift[mean <= -10].mean() if (mean <= -10).any() else 0:+.2f} C")
+            bb, aa = np.polyfit(mean[tr], TM[tr], 1)
+            te_ = (runs_id == r)
+            shift[te_] = (aa + bb * mean[te_]) - mean[te_]
+            sigma[te_] = np.std(TM[tr] - (aa + bb * mean[tr]))
+        sigma = np.where(np.isfinite(sigma), sigma, np.nanmean(sigma))
+        from math import erf
+        ncdf = np.vectorize(lambda z: 0.5 * (1.0 + erf(z / 2 ** 0.5)))
+        prod = air + COLD_AIR_BIAS_PROD
+        lin = air + shift[:, None]
+        res_sd = np.sqrt(np.maximum(sigma ** 2 - sd ** 2, 0.25))      # brakujący rozrzut (sigma całkowita - rozrzut zespołu)
+        say(f"- korekta liniowa po prognozie: MAE {np.mean(abs(mean - TM)):.2f} -> {np.mean(abs(lin.mean(axis=1) - TM)):.2f} C; "
+            f"błąd średni {np.mean(TM - mean):+.2f} -> {np.mean(TM - lin.mean(axis=1)):+.2f} C; "
+            f"średnie przesunięcie dla prognoz <= -10 C: {shift[mean <= -10].mean() if (mean <= -10).any() else 0:+.2f} C "
+            f"(produkcja: {COLD_AIR_BIAS_PROD:+.1f} C); sigma resztowa ok. {np.nanmean(sigma):.2f} C")
+        # doby bez zdarzenia (<= 1 stacja z TMIN <= prog) -> fałszywe alarmy na 1000 stacjodni
+        variants = (
+            ("surowe (bez korekty)", lambda thr: (air <= thr).mean(axis=1)),
+            (f"produkcja ({COLD_AIR_BIAS_PROD:+.1f} C)", lambda thr: (prod <= thr).mean(axis=1)),
+            ("korekta liniowa (LORO)", lambda thr: (lin <= thr).mean(axis=1)),
+            ("produkcja + wygładzenie rozrzutu (sigma z LORO)", lambda thr: ncdf((thr - prod) / res_sd[:, None]).mean(axis=1)),
+            ("korekta liniowa + wygładzenie rozrzutu", lambda thr: ncdf((thr - lin) / res_sd[:, None]).mean(axis=1)),
+        )
         for thr in (-5, -10, -15):
             ev = TM <= thr
             if ev.sum() < 5:
                 continue
-            a0 = contingency((air <= thr).mean(axis=1), ev, 0.3)
-            a1 = contingency((corr_air <= thr).mean(axis=1), ev, 0.3)
-            say(f"- próg {thr} C, P>=30%: przed: POD {a0[3]:.2f}, FAR {a0[4]:.2f}, CSI {a0[5]:.2f} (fałszywych {a0[1]}) | "
-                f"po korekcie: POD {a1[3]:.2f}, FAR {a1[4]:.2f}, CSI {a1[5]:.2f} (fałszywych {a1[1]})")
+            nev = {r: int(ev[runs_id == r].sum()) for r in np.unique(runs_id)}
+            free = np.array([nev[r] <= 1 for r in runs_id])
+            say(f"- próg {thr} C, alarm przy P>=30%:")
+            for name, fn in variants:
+                p = fn(thr); h, fa, m, pod, far, csi = contingency(p, ev, 0.3)
+                fa_free = int(((p >= 0.3) & ~ev & free).sum())
+                say(f"    {name}: POD {pod:.2f}, FAR {far:.2f}, CSI {csi:.2f}, fałszywych {fa}; na dobach bez zdarzenia {fa_free / max(int(free.sum()), 1) * 1000:.1f} na 1000 stacjodni")
     say()
 
 
