@@ -1,0 +1,58 @@
+name: SWWF - archiwizuj ICON-EU
+
+on:
+  workflow_dispatch:   # mozna tez uruchomic recznie
+    inputs:
+      run:
+        description: 'Przebieg do pobrania "RRRR-MM-DD GG" (UTC, GG = 00/06/12/18; tylko z ostatniej doby). Puste = automatycznie'
+        required: false
+        default: ''
+  schedule:
+    # cztery razy dziennie, ~4,5 h po przebiegach ICON-EU 00/06/12/18Z (DWD publikuje pliki
+    # ok. 2,5-3,5 h po czasie przebiegu). Skrypt sam wylicza, o ktory przebieg chodzi, i czeka
+    # do godziny, jesli pliki jeszcze nie sa komplet.
+    - cron: '30 4,10,16,22 * * *'
+
+permissions:
+  contents: write
+
+# jeden przebieg archiwizacji naraz (nie przerywamy trwajacego)
+concurrency:
+  group: archive-icon-eu
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ICON_RUN: ${{ inputs.run }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install eccodes requests
+
+      - name: Pobierz i zapisz prognoze ICON-EU
+        run: python archive_icon_eu.py "$ICON_RUN"
+
+      - name: Zapisz wynik do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add icon_archive/
+          git diff --staged --quiet && exit 0
+          git commit -m "Archiwum ICON-EU"
+          # inne workflow (generuj prognoze, weryfikacja) tez pushuja na main, wiec rebase + ponawianie;
+          # pliki archiwum sa unikalne dla przebiegu, wiec konfliktow tu nie ma
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
