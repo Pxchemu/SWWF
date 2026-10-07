@@ -1,0 +1,103 @@
+name: SkyPredict - alert na Telegram
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # GitHub potrafi opoznic harmonogram o kilka-kilkanascie minut
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Test calego toru: sztuczny polygon obejmujacy adres + wysylka alertu'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# jedno uruchomienie naraz (stan sky_seen.json jest wspolny)
+concurrency:
+  group: sky-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      # KROK BEZ SEKRETOW: pobranie cudzego skryptu SkyPredict
+      - name: Pobierz skrypt SkyPredict
+        id: fetch
+        run: |
+          if curl -fsS --max-time 30 -A "MeteoPanel-SkyAlert" -o sky_raw.js "https://lowcyburz.pl/sp3/script/warnings.php?_=$(date +%s)" \
+             && [ "$(wc -c < sky_raw.js)" -lt 2000000 ] && grep -q "applyData" sky_raw.js; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SkyPredict niedostepny albo nieoczekiwana odpowiedz - pomijam to uruchomienie."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Zainstaluj Node
+        if: steps.fetch.outputs.ok == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # KROK BEZ SEKRETOW: wykonanie cudzego kodu w piaskownicy Node (bez zapisu plikow, sieci i procesow)
+      - name: Wyciagnij polygony (piaskownica Node)
+        if: steps.fetch.outputs.ok == 'true'
+        run: |
+          node --permission --allow-fs-read="$PWD/sky_raw.js" sky_eval.js sky_raw.js > sky_polygons.json
+          python3 -c "import json;print('Polygonow:', len(json.load(open('sky_polygons.json'))))"
+
+      - name: Czy jest co sprawdzac
+        if: steps.fetch.outputs.ok == 'true'
+        id: need
+        env:
+          TEST: ${{ inputs.test && '1' || '' }}
+        run: |
+          N=$(python3 -c "import json;print(len(json.load(open('sky_polygons.json'))))")
+          if [ "$N" = "0" ] && [ -z "$TEST" ]; then
+            # brak aktywnych polygonow: tylko zaloz pusty stan (zeby pierwszy realny alert nie zostal "zasiany" po cichu)
+            [ -f sky_seen.json ] || echo '{"ids": []}' > sky_seen.json
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Zainstaluj Pythona
+        if: steps.fetch.outputs.ok == 'true' && steps.need.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        if: steps.fetch.outputs.ok == 'true' && steps.need.outputs.run == 'true'
+        run: pip install matplotlib shapely requests
+
+      # KROK Z SEKRETAMI: tylko nasz kod, na juz zwalidowanych danych
+      - name: Sprawdz polygony i wyslij alert
+        if: steps.fetch.outputs.ok == 'true' && steps.need.outputs.run == 'true'
+        env:
+          SKY_TG_TOKEN: ${{ secrets.TELEGRAM_SKY_BOT_TOKEN }}
+          SKY_CHAT_IDS: ${{ secrets.SKY_CHAT_IDS }}
+          SKY_LAT: ${{ secrets.SKY_LAT }}
+          SKY_LON: ${{ secrets.SKY_LON }}
+          SKY_RADIUS_KM: ${{ vars.SKY_RADIUS_KM }}
+          SKY_TEST: ${{ inputs.test && '1' || '' }}
+        run: python sky_alert.py
+
+      - name: Zapisz stan
+        if: always() && steps.fetch.outputs.ok == 'true'
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add sky_seen.json
+          git diff --staged --quiet && exit 0
+          git commit -m "Stan alertow SkyPredict"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
