@@ -1,0 +1,27 @@
+name: Telegram - test powiadomien
+
+on:
+  workflow_dispatch:   # tylko recznie
+    inputs:
+      text:
+        description: 'Tresc wiadomosci testowej (puste = domyslna)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+      TG_TEXT: ${{ inputs.text }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Wyslij wiadomosc testowa
+        run: python3 telegram_test.py
