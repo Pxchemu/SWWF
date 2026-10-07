@@ -1,42 +1,63 @@
 """
-Pobiera DOBOWE dane synoptyczne IMGW (obserwacje stacji) dla wybranych stacji i dni i zapisuje
-je do repo — żeby można było porównać prognozę SWWF z tym, co faktycznie wystąpiło
-(opad dobowy, wysokość pokrywy śnieżnej, temperatury).
+Pobiera DOBOWE dane synoptyczne IMGW (obserwacje stacji) dla wielu lat i stacji naraz i zapisuje
+je do repo — do weryfikacji i kalibracji SWWF na obserwacjach (opad dobowy, rodzaj opadu,
+pokrywa śnieżna, godziny opadu śniegu, temperatury, godziny silnego wiatru).
 
 Użycie:
+    python fetch_obs_imgw.py 2020-11-01 2026-03-31 ALL 11,12,1,2,3
     python fetch_obs_imgw.py 2025-12-28 2025-12-31 WARSZAWA
 
-Argumenty: data początkowa, data końcowa (obie włącznie, ten sam rok kalendarzowy), fragment nazwy
-stacji (wielkość liter bez znaczenia; można podać kilka po przecinku, np. "WARSZAWA,LEGIONOWO").
+Argumenty:
+    1. data początkowa RRRR-MM-DD, 2. data końcowa (włącznie) — zakres MOŻE obejmować kilka lat,
+    3. stacje: ALL (wszystkie dostępne) albo fragmenty nazw po przecinku (wielkość liter bez
+       znaczenia), np. "WARSZAWA,KRAKÓW",
+    4. (opcjonalnie) miesiące po przecinku, np. 11,12,1,2,3 = tylko sezon zimowy.
 
 Wynik (folder obs/):
-    obs/imgw_dobowe_{od}_{do}.csv     — surowe wiersze stacji z zakresu dat (kolumna 1 = plik źródłowy)
-    obs/imgw_dobowe_format.txt        — opis kolumn z IMGW (jeśli udało się go znaleźć)
-    obs/imgw_dobowe_index_{rok}.txt   — lista plików znaleziona w katalogu roku (do diagnozy)
+    obs/imgw_dobowe_{od}_{do}[_mc-...].csv.gz   — surowe wiersze stacji (kolumna 1 = plik źródłowy)
+    obs/imgw_stacje_{od}_{do}.txt               — lista stacji: kod, nazwa, liczba dni, pierwszy/ostatni dzień
+    obs/imgw_dobowe_format_{rok}.txt            — opis kolumn z IMGW danego roku (jeśli znaleziony; format bywał zmieniany)
+    obs/imgw_kolumny_{od}_{do}.txt              — ile kolumn mają wiersze w poszczególnych latach (kontrola spójności)
 
-Struktura katalogów IMGW bywa zmieniana, więc skrypt NIE zakłada nazw plików — czyta listing
-katalogu roku, pobiera wszystkie archiwa zip z tego roku i szuka w nich wierszy stacji.
+Struktura katalogów IMGW bywa zmieniana, więc skrypt NIE zakłada nazw plików: czyta listing
+katalogu każdego roku, pobiera archiwa zip i szuka w nich wierszy (pliki s_d_*.csv; pliki s_d_t_*
+mają inny układ kolumn i są pomijane). Lata bez katalogu są pomijane z komunikatem.
 Dane IMGW są jawne (https://danepubliczne.imgw.pl), bez logowania.
 """
 import csv
+import gzip
 import io
 import os
 import re
 import sys
+import time
 import zipfile
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import requests
 
 BASE = "https://danepubliczne.imgw.pl/data/dane_pomiarowo_obserwacyjne/dane_meteorologiczne/dobowe/synop/"
 HEADERS = {"User-Agent": "SWWF-verification/1.0 (research; GitHub Actions)"}
-MAX_ZIPS = 300
+MAX_ZIPS_PER_YEAR = 400
+WORKERS = 6
 
 
-def http_get(url, binary=False):
-    r = requests.get(url, headers=HEADERS, timeout=120, allow_redirects=True)
-    r.raise_for_status()
-    return r.content if binary else r.content.decode("cp1250", errors="replace")
+def http_get(url, binary=False, attempts=3):
+    """Pobiera URL; 404 -> None; inne błędy ponawia."""
+    last = None
+    for i in range(attempts):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=120, allow_redirects=True)
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.content if binary else r.content.decode("cp1250", errors="replace")
+        except Exception as e:
+            last = e
+            time.sleep(2 * (i + 1))
+    raise RuntimeError(f"{url}: {last}")
 
 
 def list_links(index_html):
@@ -50,88 +71,135 @@ def parse_date(text):
     return date(y, m, d)
 
 
-def rows_from_zip(content, name_filters, d0, d1):
-    """Wiersze z plików csv w archiwum, dla stacji pasujących do filtrów i dat z zakresu."""
+def is_data_member(name):
+    base = os.path.basename(name).lower()
+    return base.endswith(".csv") and base.startswith("s_d_") and not base.startswith("s_d_t_")
+
+
+def rows_from_zip(content, name_filters, d0, d1, months):
+    """Wiersze z plików s_d_*.csv w archiwum: pasujące stacje, daty z zakresu, miesiące.
+
+    Zwraca (wiersze, zbiór pominiętych plików o innym układzie).
+    """
     out = []
+    skipped = set()
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         for member in zf.namelist():
             if not member.lower().endswith(".csv"):
+                continue
+            if not is_data_member(member):
+                skipped.add(member)
                 continue
             text = zf.read(member).decode("cp1250", errors="replace")
             for row in csv.reader(io.StringIO(text)):
                 if len(row) < 6:
                     continue
                 station = row[1].strip().strip('"').upper()
-                if not any(f in station for f in name_filters):
+                if name_filters and not any(f in station for f in name_filters):
                     continue
                 try:
                     day = date(int(row[2]), int(row[3]), int(row[4]))
                 except ValueError:
                     continue
-                if d0 <= day <= d1:
-                    out.append([member] + [c.strip().strip('"') for c in row])
-    return out
+                if not (d0 <= day <= d1):
+                    continue
+                if months and day.month not in months:
+                    continue
+                out.append([member] + [c.strip().strip('"') for c in row])
+    return out, skipped
+
+
+def fetch_year(year, name_filters, d0, d1, months, out_dir):
+    year_url = f"{BASE}{year}/"
+    html = http_get(year_url)
+    if html is None:
+        print(f"[{year}] brak katalogu roku — pomijam", flush=True)
+        return [], {}
+    links = list_links(html)
+    zips = [l for l in links if l.lower().endswith(".zip")]
+    print(f"[{year}] archiwów zip: {len(zips)}", flush=True)
+    if not zips:
+        print(f"[{year}] brak archiwów zip (przykładowe odnośniki: {links[:8]})", flush=True)
+        return [], {}
+
+    for l in links:  # opis kolumn danego roku (jeśli jest) — format bywał zmieniany
+        if "format" in l.lower() and l.lower().endswith(".txt"):
+            txt = http_get(year_url + l)
+            if txt:
+                with open(os.path.join(out_dir, f"imgw_dobowe_format_{year}.txt"), "w", encoding="utf-8") as f:
+                    f.write(txt)
+            break
+
+    rows, skipped_all = [], set()
+
+    def one(z):
+        try:
+            content = http_get(year_url + z, binary=True)
+            if content is None:
+                return [], set()
+            return rows_from_zip(content, name_filters, d0, d1, months)
+        except Exception as e:
+            print(f"  [{year}] pominięto {z}: {e}", flush=True)
+            return [], set()
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for r, sk in ex.map(one, zips[:MAX_ZIPS_PER_YEAR]):
+            rows += r
+            skipped_all |= sk
+    ncols = Counter(len(r) for r in rows)
+    print(f"[{year}] wierszy: {len(rows)}; pominięte pliki (inny układ): {sorted(skipped_all)[:4]}"
+          f"{'...' if len(skipped_all) > 4 else ''}", flush=True)
+    return rows, dict(ncols)
 
 
 def main():
     if len(sys.argv) < 4:
-        sys.exit("Użycie: python fetch_obs_imgw.py RRRR-MM-DD RRRR-MM-DD FRAGMENT_NAZWY[,FRAGMENT2]")
+        sys.exit("Użycie: python fetch_obs_imgw.py RRRR-MM-DD RRRR-MM-DD ALL|FRAGMENT[,FRAGMENT2] [MIESIĄCE]")
     d0, d1 = parse_date(sys.argv[1]), parse_date(sys.argv[2])
-    if d0.year != d1.year or d1 < d0:
-        sys.exit("Zakres musi mieścić się w jednym roku kalendarzowym (od <= do).")
-    name_filters = [f.strip().upper() for f in sys.argv[3].split(",") if f.strip()]
+    if d1 < d0:
+        sys.exit("Data końcowa wcześniejsza niż początkowa.")
+    arg = sys.argv[3].strip()
+    name_filters = None if arg.upper() == "ALL" else [f.strip().upper() for f in arg.split(",") if f.strip()]
+    months = None
+    if len(sys.argv) > 4 and sys.argv[4].strip():
+        months = {int(m) for m in sys.argv[4].split(",") if m.strip()}
+        if not months <= set(range(1, 13)):
+            sys.exit("Miesiące muszą być liczbami 1-12.")
 
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "obs")
     os.makedirs(out_dir, exist_ok=True)
 
-    year_url = f"{BASE}{d0.year}/"
-    print(f"Listing katalogu: {year_url}")
-    index_html = http_get(year_url)
-    links = list_links(index_html)
-    zips = [l for l in links if l.lower().endswith(".zip")]
-    with open(os.path.join(out_dir, f"imgw_dobowe_index_{d0.year}.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(links) + "\n")
-    print(f"Znaleziono odnośników: {len(links)}, w tym archiwów zip: {len(zips)}")
-    print("Przykłady:", links[:12])
-    if not zips:
-        sys.exit("Brak archiwów zip w katalogu roku — zobacz obs/imgw_dobowe_index_*.txt (struktura mogła się zmienić).")
+    all_rows, cols_by_year = [], {}
+    for year in range(d0.year, d1.year + 1):
+        rows, ncols = fetch_year(year, name_filters, d0, d1, months, out_dir)
+        all_rows += rows
+        cols_by_year[year] = ncols
+    print(f"\nŁącznie wierszy: {len(all_rows)}")
+    if not all_rows:
+        sys.exit("Brak wierszy — sprawdź filtr stacji, zakres dat i miesiące.")
 
-    # opis kolumn: plik z "format" w nazwie, w katalogu roku albo nadrzędnym (synop/)
-    format_text = None
-    for url, candidates in ((year_url, links), (BASE, list_links(http_get(BASE)))):
-        for l in candidates:
-            if "format" in l.lower() and l.lower().endswith(".txt"):
-                format_text = http_get(url + l)
-                print(f"Opis kolumn: {url + l}")
-                break
-        if format_text:
-            break
-    if format_text:
-        with open(os.path.join(out_dir, "imgw_dobowe_format.txt"), "w", encoding="utf-8") as f:
-            f.write(format_text)
-        print("----- opis kolumn -----")
-        print(format_text)
-        print("-----------------------")
-    else:
-        print("Nie znaleziono pliku z opisem kolumn (nazwa zawierająca 'format').")
+    all_rows.sort(key=lambda r: (int(r[3]), int(r[4]), int(r[5]), r[2]))
+    tag = f"{d0}_{d1}" + (f"_mc-{'-'.join(str(m) for m in sorted(months))}" if months else "")
+    out_path = os.path.join(out_dir, f"imgw_dobowe_{tag}.csv.gz")
+    with gzip.open(out_path, "wt", encoding="utf-8", newline="") as f:
+        csv.writer(f).writerows(all_rows)
+    print(f"Zapisano: {out_path} ({os.path.getsize(out_path) / 1024:.0f} KB)")
 
-    rows = []
-    for n, z in enumerate(zips[:MAX_ZIPS]):
-        try:
-            rows += rows_from_zip(http_get(year_url + z, binary=True), name_filters, d0, d1)
-        except Exception as e:
-            print(f"  pominięto {z}: {e}")
-    print(f"\nZnaleziono wierszy dla {name_filters} w {d0}..{d1}: {len(rows)}")
-    if not rows:
-        sys.exit("Brak wierszy — sprawdź filtr nazwy stacji i zakres dat.")
-
-    rows.sort(key=lambda r: (r[2], int(r[3]), int(r[4]), int(r[5])))
-    out_path = os.path.join(out_dir, f"imgw_dobowe_{d0}_{d1}.csv")
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        csv.writer(f).writerows(rows)
-    for r in rows:
-        print(",".join(r))
-    print(f"\nZapisano: {out_path}")
+    # lista stacji (kod, nazwa, liczba dni, zakres) — do wyboru stacji i dopasowania do punktów ICON-EU
+    st = defaultdict(list)
+    for r in all_rows:
+        st[(r[1], r[2])].append(date(int(r[3]), int(r[4]), int(r[5])))
+    with open(os.path.join(out_dir, f"imgw_stacje_{d0}_{d1}.txt"), "w", encoding="utf-8") as f:
+        f.write("kod\tnazwa\tdni\tpierwszy\tostatni\n")
+        for (code, name), days in sorted(st.items(), key=lambda kv: kv[0][1]):
+            f.write(f"{code}\t{name}\t{len(days)}\t{min(days)}\t{max(days)}\n")
+    with open(os.path.join(out_dir, f"imgw_kolumny_{d0}_{d1}.txt"), "w", encoding="utf-8") as f:
+        f.write("rok\tliczba kolumn (z kolumną pliku źródłowego) -> liczba wierszy\n")
+        for y, nc in sorted(cols_by_year.items()):
+            f.write(f"{y}\t{nc}\n")
+    print(f"Stacji: {len(st)}")
+    for y, nc in sorted(cols_by_year.items()):
+        print(f"  {y}: kolumny -> wiersze {nc}")
 
 
 if __name__ == "__main__":
