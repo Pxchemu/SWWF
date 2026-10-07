@@ -6,15 +6,19 @@ on:
       start:
         description: 'Data poczatkowa RRRR-MM-DD'
         required: true
-        default: '2025-12-28'
+        default: '2020-11-01'
       end:
-        description: 'Data koncowa RRRR-MM-DD (ten sam rok co poczatkowa)'
+        description: 'Data koncowa RRRR-MM-DD (zakres moze obejmowac kilka lat)'
         required: true
-        default: '2025-12-31'
+        default: '2026-03-31'
       stations:
-        description: 'Fragment nazwy stacji (wielkie litery, mozna kilka po przecinku)'
+        description: 'ALL = wszystkie stacje, albo fragmenty nazw (wielkie litery, po przecinku), np. WARSZAWA,KRAKOW'
         required: true
-        default: 'WARSZAWA'
+        default: 'ALL'
+      months:
+        description: 'Miesiace po przecinku (puste = wszystkie), np. 11,12,1,2,3 = sezon zimowy'
+        required: false
+        default: '11,12,1,2,3'
 
 permissions:
   contents: write
@@ -22,11 +26,12 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       OBS_START: ${{ inputs.start }}
       OBS_END: ${{ inputs.end }}
       OBS_STATIONS: ${{ inputs.stations }}
+      OBS_MONTHS: ${{ inputs.months }}
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -40,7 +45,7 @@ jobs:
         run: pip install requests
 
       - name: Pobierz obserwacje IMGW
-        run: python fetch_obs_imgw.py "$OBS_START" "$OBS_END" "$OBS_STATIONS"
+        run: python fetch_obs_imgw.py "$OBS_START" "$OBS_END" "$OBS_STATIONS" "$OBS_MONTHS"
 
       - name: Zapisz wynik do repo
         if: always()
