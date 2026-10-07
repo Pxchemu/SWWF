@@ -11,6 +11,10 @@ on:
         description: 'Plik obserwacji w repo (puste = najnowszy obs/imgw_dobowe_*.csv.gz)'
         required: false
         default: ''
+      quiet_list:
+        description: 'Plik z lista przebiegow BEZ zjawisk (daty RRRR-MM-DD, np. clim_runs.txt) - wlacza podzial raportu i sekcje 6 (falszywe alarmy). Puste = bez podzialu'
+        required: false
+        default: 'clim_runs.txt'
 
 permissions:
   contents: write
@@ -22,6 +26,7 @@ jobs:
     env:
       HC_DIR: ${{ inputs.hindcast_dir }}
       OBS_FILE: ${{ inputs.obs_file }}
+      QUIET_LIST: ${{ inputs.quiet_list }}
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -36,11 +41,10 @@ jobs:
 
       - name: Policz raport
         run: |
-          if [ -n "$OBS_FILE" ]; then
-            python calibrate_swwf.py --hindcast "$HC_DIR" --obs "$OBS_FILE" --out "reports/calibration_report_${HC_DIR}.md"
-          else
-            python calibrate_swwf.py --hindcast "$HC_DIR" --out "reports/calibration_report_${HC_DIR}.md"
-          fi
+          ARGS=(--hindcast "$HC_DIR" --out "reports/calibration_report_${HC_DIR}.md")
+          if [ -n "$OBS_FILE" ]; then ARGS+=(--obs "$OBS_FILE"); fi
+          if [ -n "$QUIET_LIST" ]; then ARGS+=(--quiet-list "$QUIET_LIST"); fi
+          python calibrate_swwf.py "${ARGS[@]}"
 
       - name: Zapisz raport do repo
         run: |
