@@ -560,6 +560,42 @@ def section_snow_cal(runs, obs):
     say()
 
 
+SNOW_RATIO_PROD = ((-99, -10, 15.0), (-10, -5, 12.0), (-5, 0.01, 10.0), (0.01, 99, 7.0))   # jak snow_density_ratio w generate_swwf.py
+
+
+def section_snow_ratio(obs):
+    """Przelicznik śnieg:woda (cm śniegu na 1 mm wody) z obserwacji: przyrost pokrywy PKSN (cm, 06 UTC D - 06 UTC D-1)
+    do opadu dobowego SMDB (mm) w dobach z opadem rodzaju S. Niezależne od hindcastu (cała próbka obserwacji)."""
+    say("## 9. Przelicznik śnieg:woda — przyrost pokrywy śnieżnej (PKSN) / opad dobowy (SMDB), doby z opadem śniegu")
+    say("Doba D: ROOP = S, SMDB >= 2 mm, PKSN znane w D i D-1, przyrost > 0. Temperatura = (TMIN+TMAX)/2 doby. Wartość = cm śniegu na 1 mm wody "
+        "(10 = klasyczne 10:1). Uwaga: przyrost pokrywy jest DOLNYM oszacowaniem (osiadanie, topnienie, zawianie), a niedoszacowanie "
+        "opadu przez deszczomierz przy śniegu (wiatr) zawyża iloraz — wynik traktować jako rząd wielkości.")
+    rows = []
+    for (st, d), o in obs.items():
+        if o.get("ROOP") != "S":
+            continue
+        sm, pk, tmin, tmax = o.get("SMDB"), o.get("PKSN"), o.get("TMIN"), o.get("TMAX")
+        prev = obs.get((st, d - timedelta(days=1)))
+        if prev is None or not all(np.isfinite(x) for x in (sm, pk, tmin, tmax, prev.get("PKSN", np.nan))):
+            continue
+        dpk = pk - prev["PKSN"]
+        if sm >= 2 and dpk > 0:
+            rows.append(((tmin + tmax) / 2.0, dpk / sm))
+    if len(rows) < 30:
+        say(f"- za mało dób do oceny (n={len(rows)})")
+        say()
+        return
+    T = np.array([r[0] for r in rows]); R = np.array([r[1] for r in rows])
+    say(f"- dób z przyrostem pokrywy: {len(R)}; mediana ilorazu {np.median(R):.1f} cm/mm (kwartyle {np.percentile(R, 25):.1f}-{np.percentile(R, 75):.1f})")
+    for lo, hi, prod in SNOW_RATIO_PROD:
+        sel = (T > lo) & (T <= hi)
+        if sel.sum() >= 15:
+            q = np.percentile(R[sel], [25, 50, 75])
+            lab = f"T śr. {lo if lo > -99 else '<'}..{hi if hi < 99 else '>'}".replace("0.01", "0")
+            say(f"- {lab} C: n={int(sel.sum())}, mediana {q[1]:.1f} cm/mm (kwartyle {q[0]:.1f}-{q[2]:.1f}); produkcja używa {prod / 10:.1f} cm/mm ({prod:.0f}:1)")
+    say()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hindcast", default="hindcast_v2")
@@ -594,6 +630,7 @@ def main():
     section_quiet(runs, obs)
     section_cold_bias(runs, obs)
     section_snow_cal(runs, obs)
+    section_snow_ratio(obs)
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
