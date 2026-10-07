@@ -1,0 +1,120 @@
+name: SWWF - hindcast GEFS dla stacji IMGW (kalibracja)
+
+on:
+  workflow_dispatch:   # tylko recznie
+    inputs:
+      runs:
+        description: 'Przebiegi GEFS po przecinku, "RRRR-MM-DD GG" (UTC; GG = 00/06/12/18), np. 2021-01-03 00,2021-01-04 00,2021-01-05 00'
+        required: true
+      chunk_size:
+        description: 'Ilu czlonkow na jedno zadanie (30 czlonkow dzielone na kawalki; mniejszy = szybciej, wiecej zadan)'
+        required: true
+        default: '10'
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.make.outputs.matrix }}
+    env:
+      HC_RUNS: ${{ inputs.runs }}
+      HC_CHUNK: ${{ inputs.chunk_size }}
+    steps:
+      - name: Zbuduj liste zadan (przebieg x kawalek czlonkow)
+        id: make
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, sys
+          runs = [r.strip() for r in os.environ["HC_RUNS"].split(",") if r.strip()]
+          chunk = int(os.environ["HC_CHUNK"])
+          if not runs or not (1 <= chunk <= 30):
+              sys.exit("Pusta lista przebiegow albo zly rozmiar kawalka (1-30).")
+          include = []
+          for r in runs:
+              if not re.fullmatch(r"\d{4}-\d{2}-\d{2} (00|06|12|18)", r):
+                  sys.exit(f"Zly przebieg: {r!r} (oczekiwane 'RRRR-MM-DD GG', GG = 00/06/12/18)")
+              if r < "2020-09-24":
+                  sys.exit(f"{r}: GEFS 0.25 na AWS jest dostepny dopiero od 2020-09-23")
+              for a in range(1, 31, chunk):
+                  b = min(a + chunk - 1, 30)
+                  include.append({"run": r, "m_from": a, "m_to": b,
+                                  "tag": f"{r.replace(' ', '_')}_m{a}-{b}"})
+          print(f"Zadan: {len(include)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+          EOF
+
+  extract:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false      # blad jednego kawalka nie zabija reszty
+      max-parallel: 15
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      HC_RUN: ${{ matrix.run }}
+      HC_FROM: ${{ matrix.m_from }}
+      HC_TO: ${{ matrix.m_to }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install herbie-data
+
+      - name: Wyciagnij dane GEFS dla stacji
+        run: python hindcast_points.py extract "$HC_RUN" "$HC_FROM" "$HC_TO" hindcast_chunks
+
+      - name: Zachowaj wynik kawalka
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.tag }}
+          path: hindcast_chunks/
+          if-no-files-found: ignore
+          retention-days: 3
+
+  commit:
+    needs: [plan, extract]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pobierz kawalki
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          merge-multiple: true
+          path: hindcast_chunks
+
+      - name: Scal kawalki w pliki na przebieg
+        run: python hindcast_points.py merge hindcast_chunks hindcast
+
+      - name: Zapisz wynik do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add hindcast/
+          git diff --staged --quiet && exit 0
+          git commit -m "Hindcast GEFS dla stacji IMGW"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
