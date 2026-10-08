@@ -92,12 +92,39 @@ HAZARD_TITLES = {
     "snow_24h_cm": "Śnieg",
     "cold_min_t2m_c": "Mróz",
     "snow_squalls": "Szkwały śnieżne",
-    "precip_24h_mm": "Opad (hazard testowy)",
+    "precip_24h_mm": "Opady (suma 24 h)",
 }
 SIGNAL_HAZARDS = ["snow_24h_cm", "cold_min_t2m_c", "snow_squalls", "general_winter_risk"]
 EMOJI = ["⬜", "🟩", "🟨", "🟧", "🟥", "🟪"]
 WEEKDAYS = ["pn", "wt", "śr", "czw", "pt", "sob", "niedz"]
 LEVEL_DESC = ["brak zagrożenia", "niewielkie", "podwyższone", "umiarkowane", "wysokie", "ekstremalne"]
+
+# --- wersje językowe map (PL domyślnie jak dotąd; EN dla odbiorców angielskojęzycznych)
+WEEKDAYS_EN = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+CITY_EN = {"Warszawa": "Warsaw", "Kraków": "Krakow", "Gdańsk": "Gdansk", "Wrocław": "Wroclaw", "Poznań": "Poznan",
+           "Szczecin": "Szczecin", "Lublin": "Lublin", "Białystok": "Bialystok", "Łódź": "Lodz", "Rzeszów": "Rzeszow",
+           "Katowice": "Katowice", "Olsztyn": "Olsztyn", "Bydgoszcz": "Bydgoszcz", "Opole": "Opole",
+           "Zielona Góra": "Zielona Gora", "Kielce": "Kielce", "Berlin": "Berlin", "Hamburg": "Hamburg",
+           "Brema": "Bremen", "Hanower": "Hanover", "Kolonia": "Cologne", "Düsseldorf": "Dusseldorf",
+           "Dortmund": "Dortmund", "Frankfurt": "Frankfurt", "Stuttgart": "Stuttgart", "Monachium": "Munich",
+           "Norymberga": "Nuremberg", "Lipsk": "Leipzig", "Drezno": "Dresden", "Magdeburg": "Magdeburg",
+           "Saarbrücken": "Saarbrucken", "Fryburg": "Freiburg", "Praga": "Prague", "Brno": "Brno",
+           "Ostrawa": "Ostrava", "Bratysława": "Bratislava", "Koszyce": "Kosice", "Wiedeń": "Vienna"}
+TEXTS = {
+    "pl": dict(day="Dzień", valid="ważne", tz="czas polski", wd=WEEKDAYS, top="Najwyższy poziom",
+               none="Brak obszarów zagrożenia", levels=LEVEL_DESC,
+               foot1="Własna analiza zespołu GEFS (30 członków) · przebieg {run}, wydano {issued}",
+               foot2="Poziom wynika z macierzy: prawdopodobieństwo × intensywność. To nie jest oficjalne ostrzeżenie IMGW.",
+               titles=None),
+    "en": dict(day="Day", valid="valid", tz="Central European time", wd=WEEKDAYS_EN, top="Highest level",
+               none="No hazard areas",
+               levels=["no hazard", "low", "elevated", "significant", "high", "extreme"],
+               foot1="Own analysis of a 30-member GEFS ensemble · run {run}, issued {issued}",
+               foot2="Level comes from a matrix: probability × intensity. This is not an official warning.",
+               titles={"general_winter_risk": "General winter risk", "snow_24h_cm": "Snow",
+                       "cold_min_t2m_c": "Cold", "snow_squalls": "Snow squalls",
+                       "precip_24h_mm": "Precipitation (24 h)"}),
+}
 
 
 # ----------------------------------------------------------------------------- pomocnicze
@@ -105,10 +132,11 @@ def parse_iso(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
 
 
-def fmt_day_range(a: str, b: str) -> str:
+def fmt_day_range(a: str, b: str, lang: str = "pl") -> str:
     da, db = parse_iso(a), parse_iso(b)
-    return (f"{WEEKDAYS[da.weekday()]} {da:%d.%m} {da:%H:%M} → "
-            f"{WEEKDAYS[db.weekday()]} {db:%d.%m} {db:%H:%M}")
+    wd = TEXTS[lang]["wd"]
+    return (f"{wd[da.weekday()]} {da:%d.%m} {da:%H:%M} → "
+            f"{wd[db.weekday()]} {db:%d.%m} {db:%H:%M}")
 
 
 def level_index(name: str, names: list) -> int:
@@ -213,15 +241,17 @@ def rounded_rect_xy(x0, y0, x1, y1, rx, ry, n=10):
 
 
 # ----------------------------------------------------------------------------- rysowanie mapy
-def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: str, theme: str = "dark"):
+def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: str, theme: str = "dark",
+               lang: str = "pl"):
     from matplotlib.patches import FancyBboxPatch
     th = THEMES.get(theme, THEMES["dark"])
+    T = TEXTS.get(lang, TEXTS["pl"])
     body, head = setup_fonts()
     plt.rcParams["font.family"] = body
     names = swwf["level_names"]
     colors = swwf["level_colors"]
     hazard = day["hazards"][hazard_key]
-    title = HAZARD_TITLES.get(hazard_key, hazard_key)
+    title = (T["titles"] or HAZARD_TITLES).get(hazard_key, hazard_key)
     feats = (hazard.get("areas") or {}).get("features") or []
     feats = sorted(feats, key=lambda f: level_index(f["properties"].get("level", ""), names))
     present = {level_index(f["properties"].get("level", ""), names) for f in feats}
@@ -257,7 +287,7 @@ def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: 
     fig.text(fx(hx), fy(FH - 0.30 - 0.20), title, fontsize=21, fontweight="bold", family=head,
              va="center", color=th["text"])
     fig.text(fx(hx), fy(FH - 0.30 - 0.58),
-             f"{day['label']}  ·  ważne {fmt_day_range(day['valid_from'], day['valid_to'])} (czas polski)",
+             f"{day['label'].replace('Dzień', T['day'])}  ·  {T['valid']} {fmt_day_range(day['valid_from'], day['valid_to'], lang)} ({T['tz']})",
              fontsize=10.5, color=th["sub"], va="center")
 
     # ---- zakladki dni (jak na stronie): aktywny dzien wypelniony
@@ -277,7 +307,7 @@ def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: 
                                      fc=th["pill_on"] if active else th["pill_off"],
                                      ec=th["pill_on"] if active else th["frame"], lw=0.8,
                                      mutation_aspect=pill_h / pill_w))
-        pax.text(0.5, 0.5, d["label"], ha="center", va="center", fontsize=9, fontweight="semibold",
+        pax.text(0.5, 0.5, d["label"].replace("Dzień", T["day"]), ha="center", va="center", fontsize=9, fontweight="semibold",
                  color=th["pill_on_text"] if active else th["sub"])
 
     # ---- mapa
@@ -323,7 +353,7 @@ def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: 
     for name, lat, lon, dx, dy in CITIES:
         ax.plot(lon, lat, "o", color=th["city"], markersize=2.6, zorder=5, markeredgecolor=th["halo"],
                 markeredgewidth=0.6, clip_path=clip_patch)
-        t = ax.text(lon + dx, lat + dy, name, fontsize=7.4, fontweight="medium", color=th["city"], zorder=6,
+        t = ax.text(lon + dx, lat + dy, CITY_EN.get(name, name) if lang == "en" else name, fontsize=7.4, fontweight="medium", color=th["city"], zorder=6,
                     path_effects=halo)
         t.set_clip_path(clip_patch)
 
@@ -333,10 +363,10 @@ def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: 
     # plakietka na mapie: najwyzszy poziom (albo brak zagrozen)
     bx, by = LON_MIN + 0.45, LAT_MIN + 0.30
     if feats:
-        label = f"Najwyższy poziom  {names[top]}"
+        label = f"{T['top']}  {names[top]}"
         dot = colors[top]
     else:
-        label = "Brak obszarów zagrożenia"
+        label = T["none"]
         dot = th["sub"]
     ax.annotate("       " + label, xy=(bx, by), xytext=(0, 0), textcoords="offset points", fontsize=9.5,
                 fontweight="semibold", color=th["text"], va="center", ha="left", zorder=8, annotation_clip=False,
@@ -361,14 +391,13 @@ def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: 
                                     alpha=1.0 if on else 0.7, mutation_aspect=LG_H * 0.20 / (MAP_W / 6)))
         lg.text(x0 + 0.02, 0.50, names[i], fontsize=9, fontweight="bold" if on else "medium",
                 color=th["text"] if on else th["sub"], va="center")
-        lg.text(x0 + 0.02, 0.22, LEVEL_DESC[i], fontsize=7.6, color=th["sub"] if on else th["foot"], va="center")
+        lg.text(x0 + 0.02, 0.22, T["levels"][i], fontsize=7.6, color=th["sub"] if on else th["foot"], va="center")
 
     # ---- stopka
     run = parse_iso(swwf["model_run"])
     issued = parse_iso(swwf["issued"])
     fig.text(fx(M), fy(0.36),
-             f"Własna analiza zespołu GEFS (30 członków) · przebieg {run:%d.%m %H:%M}, wydano {issued:%d.%m %H:%M}\n"
-             "Poziom wynika z macierzy: prawdopodobieństwo × intensywność. To nie jest oficjalne ostrzeżenie IMGW.",
+             T["foot1"].format(run=f"{run:%d.%m %H:%M}", issued=f"{issued:%d.%m %H:%M}") + "\n" + T["foot2"],
              fontsize=7.4, color=th["foot"], va="center", linespacing=1.5)
     fig.text(FW and fx(FW - M), fy(0.36), "MeteoPanel", fontsize=10.5, fontweight="bold", family=head,
              ha="right", va="center", color=th["sub"])
@@ -427,8 +456,10 @@ def read_state():
 
 
 def write_state(digest, has_signal):
+    state = read_state()
+    state.update({"signature": digest, "has_signal": has_signal})
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"signature": digest, "has_signal": has_signal}, f)
+        json.dump(state, f)
 
 
 # ----------------------------------------------------------------------------- Telegram
@@ -469,13 +500,8 @@ def send_text(token, chat_id, text):
 
 
 # ----------------------------------------------------------------------------- main
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true", help="tylko rysuj i pokaz tekst, nic nie wysylaj")
-    ap.add_argument("--out-dir", default="swwf_maps")
-    ap.add_argument("--swwf", default=SWWF_JSON)
-    args = ap.parse_args()
-
+def main_changes(args) -> int:
+    """TRYB STARY (TG_MODE=changes): wysyłka po zmianie poziomów zagrożeń, jedna mapa wybranego hazardu."""
     hazard_key = os.environ.get("TG_HAZARD", "").strip() or "general_winter_risk"
     try:
         min_level = int(os.environ.get("TG_MIN_LEVEL", "").strip() or "2")
@@ -541,6 +567,152 @@ def main() -> int:
         write_state(digest, has_signal)
     print(f"Dotarło do {ok_count} z {len(chats)} odbiorców.")
     return 0 if ok_count == len(chats) else 1
+
+
+# ----------------------------------------------------------------------------- tryb poranny
+MORNING_HAZARDS = ["general_winter_risk", "precip_24h_mm"]   # mapy: zimowe razem + opad
+MORNING_CAPTION = {"pl": "🗺 Mapy SWWF — dni, w których prognozowane jest zagrożenie",
+                   "en": "🗺 SWWF maps — days with a forecast hazard"}
+
+
+def morning_map_list(swwf: dict, min_level: int):
+    """[(numer_doby, klucz_hazardu)] tylko tam, gdzie na mapie jest obszar o poziomie >= min_level."""
+    names = swwf["level_names"]
+    out = []
+    for i, day in enumerate(swwf["days"]):
+        for k in MORNING_HAZARDS:
+            h = day["hazards"].get(k)
+            if h and max_level(h, names) >= min_level:
+                out.append((i, k))
+    return out
+
+
+def split_text(text: str, limit: int = 4000):
+    """Dzieli długi tekst na części <= limit znaków, po pustych liniach."""
+    if len(text) <= limit:
+        return [text]
+    parts, cur = [], ""
+    for block in text.split("\n\n"):
+        if cur and len(cur) + 2 + len(block) > limit:
+            parts.append(cur)
+            cur = block
+        else:
+            cur = f"{cur}\n\n{block}" if cur else block
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def send_maps(token, chat_id, image_paths, caption):
+    """1 zdjęcie -> sendPhoto (album wymaga >= 2), więcej -> albumy po <= 10."""
+    if len(image_paths) == 1:
+        with open(image_paths[0], "rb") as fh:
+            return tg_call(token, "sendPhoto", {"chat_id": chat_id, "caption": caption}, {"photo": fh})
+    ok, err = True, ""
+    for n in range(0, len(image_paths), 10):
+        chunk = image_paths[n:n + 10]
+        if len(chunk) == 1:
+            with open(chunk[0], "rb") as fh:
+                o, e = tg_call(token, "sendPhoto", {"chat_id": chat_id}, {"photo": fh})
+        else:
+            o, e = send_album(token, chat_id, chunk, caption if n == 0 else "")
+        ok, err = ok and o, err or e
+    return ok, err
+
+
+def main_morning(args) -> int:
+    """Depesza poranna: raz dziennie, po pierwszej nowej prognozie danego dnia (data wydania wg czasu polskiego).
+
+    Tekst: PL do TG_CHAT_IDS, EN do TG_CHAT_IDS_EN. Mapy tylko dla dób/hazardów, na których coś jest."""
+    import swwf_airmet as AM
+    force = os.environ.get("TG_FORCE", "").strip() in ("1", "true", "True")
+    try:
+        min_map = int(os.environ.get("TG_MAP_MIN_LEVEL", "").strip() or "1")
+    except ValueError:
+        min_map = 1
+    try:
+        min_text = int(os.environ.get("AIRMET_MIN_LEVEL", "").strip() or "1")
+    except ValueError:
+        min_text = 1
+    with open(args.swwf, encoding="utf-8") as f:
+        swwf = json.load(f)
+
+    issued_date = parse_iso(swwf["issued"]).date().isoformat()
+    state = read_state()
+    ms = state.get("morning") or {}
+    if ms.get("date") != issued_date:
+        ms = {"date": issued_date, "pl": False, "en": False}
+    print(f"Wydanie z {issued_date} (przebieg {swwf['model_run']}); wysłano dziś: PL={ms['pl']}, EN={ms['en']}; force={force}")
+
+    token = os.environ.get("TG_TOKEN", "").strip()
+    chats = {
+        "pl": [c.strip() for c in os.environ.get("TG_CHAT_IDS", "").split(",") if c.strip()],
+        "en": [c.strip() for c in os.environ.get("TG_CHAT_IDS_EN", "").split(",") if c.strip()],
+    }
+    langs = [l for l in ("pl", "en") if (args.dry_run or chats[l]) and (force or args.dry_run or not ms[l])]
+    for l in ("pl", "en"):
+        if not chats[l] and not args.dry_run:
+            print(f"Brak odbiorców {l.upper()} (sekret TG_CHAT_IDS{'_EN' if l == 'en' else ''}) — pomijam.")
+    if not langs:
+        print("Nic do wysłania (już wysłano dziś albo brak odbiorców).")
+        return 0
+    if not args.dry_run and not token:
+        print("Brak sekretu TG_TOKEN.")
+        return 1
+
+    texts = {}
+    if "pl" in langs:
+        texts["pl"] = AM.build_message_pl(swwf, AM.load_voivodeships(), min_text)
+    if "en" in langs:
+        texts["en"] = AM.build_message_en(swwf, AM.load_countries(), min_text)
+
+    todo = morning_map_list(swwf, min_map)
+    print("Mapy do wysłania: " + (", ".join(f"Dzień {i + 1}:{k}" for i, k in todo) or "brak (nic nie wystąpi)"))
+    maps = {l: [] for l in langs}
+    if todo:
+        os.makedirs(args.out_dir, exist_ok=True)
+        countries, admin1 = load_countries(), load_admin1()
+        theme = os.environ.get("TG_THEME", "").strip() or "dark"
+        for l in langs:
+            for i, k in todo:
+                path = os.path.join(args.out_dir, f"swwf_{l}_dzien{i + 1}_{k}.png")
+                render_map(swwf["days"][i], k, swwf, countries, admin1, path, theme, lang=l)
+                maps[l].append(path)
+
+    if args.dry_run:
+        for l in langs:
+            print(f"\n===== {l.upper()} =====\n{texts[l]}")
+        return 0
+
+    all_ok = True
+    for l in langs:
+        ok_lang = True
+        for n, chat in enumerate(chats[l], 1):
+            ok, err = True, ""
+            for part in split_text(texts[l]):
+                o, e = send_text(token, chat, part)
+                ok, err = ok and o, err or e
+            if ok and maps[l]:
+                o, e = send_maps(token, chat, maps[l], MORNING_CAPTION[l])
+                ok, err = ok and o, err or e
+            print(f"{l.upper()} odbiorca {n}/{len(chats[l])}: {'wysłano' if ok else 'BŁĄD ' + err}")
+            ok_lang = ok_lang and ok
+        ms[l] = ms[l] or ok_lang
+        all_ok = all_ok and ok_lang
+    state["morning"] = ms
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    return 0 if all_ok else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true", help="tylko rysuj i pokaz tekst, nic nie wysylaj")
+    ap.add_argument("--out-dir", default="swwf_maps")
+    ap.add_argument("--swwf", default=SWWF_JSON)
+    args = ap.parse_args()
+    mode = os.environ.get("TG_MODE", "").strip().lower() or "morning"
+    return main_changes(args) if mode == "changes" else main_morning(args)
 
 
 if __name__ == "__main__":
