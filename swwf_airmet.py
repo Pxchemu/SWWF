@@ -301,7 +301,7 @@ def build_message_pl(swwf, voivs, min_level=1):
     cells = cells_by_voivodeship(swwf["grid"], voivs)
     day = swwf["days"][0]
     issued = parse_iso(swwf["issued"])
-    out = ["SWWF — PROGNOZA ZAGROŻEŃ NA NAJBLIŻSZĄ DOBĘ (PROTOTYP)",
+    out = ["SWWF — PROGNOZA ZAGROŻEŃ NA NAJBLIŻSZĄ DOBĘ",
            f"Ważna: {fmt_t(day['valid_from'])} → {fmt_t(day['valid_to'])} (czas polski)",
            f"Przebieg GEFS: {fmt_t(swwf['model_run'])} · wydano {issued:%d.%m %H:%M}",
            ""]
@@ -536,7 +536,7 @@ def build_message_en(swwf, countries, min_level=1):
     day = swwf["days"][0]
     issued = parse_iso(swwf["issued"])
     nice = join_en([n for n, _ in countries])
-    out = ["SWWF — CENTRAL EUROPE WINTER HAZARD OUTLOOK, NEXT 24 HOURS (PROTOTYPE)",
+    out = ["SWWF — CENTRAL EUROPE WINTER HAZARD OUTLOOK, NEXT 24 HOURS",
            f"Valid: {fmt_t_en(day['valid_from'])} → {fmt_t_en(day['valid_to'])}",
            f"Area: {nice} · GEFS run {fmt_t_en(swwf['model_run'])} · issued {fmt_t_en(swwf['issued'])}",
            ""]
