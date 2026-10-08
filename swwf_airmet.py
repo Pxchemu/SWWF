@@ -10,8 +10,9 @@ opisu, gdy co najmniej MIN_COVER jego pól osiąga dany poziom; "w większości"
 MOST_COVER. Granice: voivodeships_pl.geojson (w repo; jeśli go brak, pobierane i zapisywane).
 
 Użycie:
-  python swwf_airmet.py                       # czyta swwf.json, pisze airmet.txt i drukuje
-  python swwf_airmet.py swwf.json --out x.txt
+  python swwf_airmet.py                       # czyta swwf.json, pisze airmet_pl.txt (Polska, PL)
+                                              # i airmet_ce.txt (Europa Środkowa, EN) oraz drukuje oba
+  python swwf_airmet.py swwf.json --out-pl a.txt --out-ce b.txt
 Zmienne: AIRMET_MIN_LEVEL (domyślnie 1 = SLIGHT) — najniższy poziom ujmowany w komunikacie.
 """
 import argparse
@@ -108,21 +109,26 @@ def cells_by_voivodeship(grid, voivs):
     return out
 
 
-def part_of_region(cells_hit, cells_all):
-    """Kierunek części województwa jako przymiotnik w miejscowniku ('północno-wschodniej'), albo ''."""
+def region_direction(cells_hit, cells_all):
+    """(ns, ew): 'N'/'S'/'' i 'E'/'W'/'' — gdzie w obszarze leży zbiór pól cells_hit."""
     lats = [c[2] for c in cells_all]
     lons = [c[3] for c in cells_all]
     span_la, span_lo = max(lats) - min(lats), max(lons) - min(lons)
     if span_la < 1e-6 and span_lo < 1e-6:
-        return ""
+        return "", ""
     cla = sum(c[2] for c in cells_hit) / len(cells_hit) - sum(lats) / len(lats)
     clo = sum(c[3] for c in cells_hit) / len(cells_hit) - sum(lons) / len(lons)
-    ns = "północna" if span_la > 0 and cla > 0.2 * span_la else "południowa" if span_la > 0 and cla < -0.2 * span_la else ""
-    ew = "wschodnia" if span_lo > 0 and clo > 0.2 * span_lo else "zachodnia" if span_lo > 0 and clo < -0.2 * span_lo else ""
-    if ns and ew:
-        word = f"{ns[:-1]}o-{ew}"
-    else:
-        word = ns or ew
+    ns = "N" if span_la > 0 and cla > 0.2 * span_la else "S" if span_la > 0 and cla < -0.2 * span_la else ""
+    ew = "E" if span_lo > 0 and clo > 0.2 * span_lo else "W" if span_lo > 0 and clo < -0.2 * span_lo else ""
+    return ns, ew
+
+
+def part_of_region(cells_hit, cells_all):
+    """Kierunek części województwa jako przymiotnik w miejscowniku ('północno-wschodniej'), albo ''."""
+    ns, ew = region_direction(cells_hit, cells_all)
+    ns = {"N": "północna", "S": "południowa", "": ""}[ns]
+    ew = {"E": "wschodnia", "W": "zachodnia", "": ""}[ew]
+    word = f"{ns[:-1]}o-{ew}" if ns and ew else (ns or ew)
     return word[:-1] + "ej" if word else ""      # północna -> północnej, północno-wschodnia -> północno-wschodniej
 
 
@@ -290,7 +296,7 @@ def trend_sentence(day, cells, names):
     return s + "."
 
 
-def build_message(swwf, voivs, min_level=1):
+def build_message_pl(swwf, voivs, min_level=1):
     names = swwf["level_names"]
     cells = cells_by_voivodeship(swwf["grid"], voivs)
     day = swwf["days"][0]
@@ -314,8 +320,10 @@ def build_message(swwf, voivs, min_level=1):
         top = paragraphs[0][0]
         lead = [p for p in paragraphs if p[0] == top]
         nm = join_pl([TITLE[p[2]].lower() for p in lead])
-        if top >= 3:
+        if top >= 4:
             tone = "Prognozujemy poważne zagrożenie"
+        elif top == 3:
+            tone = "Prognozujemy znaczące zagrożenie"
         elif top == 2:
             tone = "Prognozujemy podwyższone zagrożenie"
         else:
@@ -338,18 +346,249 @@ def build_message(swwf, voivs, min_level=1):
     return "\n".join(out)
 
 
+# ============================================================================= EUROPA ŚRODKOWA (EN)
+# Wszystkie cztery kraje objęte SWWF traktowane identycznie: ten sam poziom szczegółowości
+# (kraj w całości / większość / część z kierunkiem), kolejność alfabetyczna, bez podziału na regiony.
+MIN_COVER_CE = 0.08   # kraje są duże, więc niżej niż dla województw; poniżej: "isolated areas"
+COUNTRIES_FILE = "countries_ce.geojson"
+COUNTRIES_URL = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
+                 "master/geojson/ne_10m_admin_0_countries.geojson")
+CE_ISO = {"DEU": "Germany", "POL": "Poland", "CZE": "Czechia", "SVK": "Slovakia"}
+WEEKDAYS_EN = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+PHENOMENON_EN = {
+    "precip_24h_mm": ["", "light to moderate precipitation", "fairly heavy precipitation",
+                      "heavy precipitation", "very heavy precipitation", "extreme precipitation"],
+    "snow_24h_cm": ["", "light snowfall", "moderate snowfall", "heavy snowfall",
+                    "very heavy snowfall", "extreme snowfall"],
+    "cold_min_t2m_c": ["", "frost", "severe frost", "severe frost", "very severe frost", "extreme frost"],
+    "snow_squalls": ["", "sudden heavy snow showers", "sudden heavy snow showers",
+                     "snow squalls", "severe snow squalls", "extreme snow squalls"],
+}
+TITLE_EN = {"precip_24h_mm": "Precipitation", "snow_24h_cm": "Snow", "cold_min_t2m_c": "Cold",
+            "snow_squalls": "Snow squalls"}
+DIR_EN = {("N", ""): "northern", ("S", ""): "southern", ("", "E"): "eastern", ("", "W"): "western",
+          ("N", "E"): "north-eastern", ("N", "W"): "north-western",
+          ("S", "E"): "south-eastern", ("S", "W"): "south-western"}
+
+
+def load_countries():
+    """-> lista (nazwa angielska, geometria) dla DEU/POL/CZE/SVK, alfabetycznie."""
+    if os.path.exists(COUNTRIES_FILE):
+        with open(COUNTRIES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        out = [(ft["properties"]["name"], shape(ft["geometry"])) for ft in data["features"]]
+        return sorted(out, key=lambda t: t[0])
+    print("Brak countries_ce.geojson — pobieram granice państw i zapisuję cache.", file=sys.stderr)
+    from shapely.geometry import mapping
+    req = urllib.request.Request(COUNTRIES_URL, headers={"User-Agent": "meteopanel-swwf"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = json.loads(r.read().decode())
+    out, feats = [], []
+    for ft in data["features"]:
+        iso = ft["properties"].get("ISO_A3")
+        if iso in CE_ISO:
+            g = shape(ft["geometry"]).simplify(0.02)
+            out.append((CE_ISO[iso], g))
+            feats.append({"type": "Feature", "properties": {"name": CE_ISO[iso], "iso3": iso},
+                          "geometry": mapping(g)})
+    with open(COUNTRIES_FILE, "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "features": feats}, f, separators=(",", ":"))
+    return sorted(out, key=lambda t: t[0])
+
+
+def fmt_t_en(s):
+    d = parse_iso(s)
+    zone = {7200: "CEST", 3600: "CET"}.get(int(d.utcoffset().total_seconds()), "local time")
+    return f"{WEEKDAYS_EN[d.weekday()]} {d.day:02d} {MONTHS_EN[d.month - 1]} {d:%H:%M} {zone}"
+
+
+def join_en(items):
+    items = list(items)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def chance_word_en(p):
+    if p >= 85:
+        return "very likely"
+    if p >= 60:
+        return "likely"
+    if p >= 30:
+        return "possible"
+    return "unlikely but not ruled out"
+
+
+def area_phrase_en(level, grid_levels, cells):
+    """Ten sam schemat dla każdego kraju: 'the whole of X' / 'most of X' / 'the southern part of X'."""
+    pieces, touched_only = [], []
+    for name, cs in cells.items():
+        if not cs:
+            continue
+        hit = [c for c in cs if grid_levels[c[0]][c[1]] >= level]
+        cover = len(hit) / len(cs)
+        if cover >= 0.95:
+            pieces.append(f"the whole of {name}")
+        elif cover >= MOST_COVER:
+            pieces.append(f"most of {name}")
+        elif cover >= MIN_COVER_CE:
+            d = DIR_EN.get(region_direction(hit, cs), "")
+            pieces.append(f"the {d} part of {name}" if d else f"parts of {name}")
+        elif hit:
+            touched_only.append(name)
+    if touched_only:
+        pieces.append(f"isolated areas of {join_en(touched_only)}")
+    return join_en(pieces)
+
+
+def intensity_phrase_en(key, vals):
+    if key == "snow_squalls":
+        return ""
+    if key == "cold_min_t2m_c":
+        typ, peak = statistics.median(vals), min(vals)
+        a, b = f"{round(typ):d}".replace("-", "−"), f"{round(peak):d}".replace("-", "−")
+        if a == b:
+            return f"Minimum temperature around {a} °C"
+        return f"Minimum temperature typically around {a} °C, locally down to {b} °C"
+    unit = "mm" if key == "precip_24h_mm" else "cm"
+    what = "Precipitation total" if key == "precip_24h_mm" else "Fresh snow depth"
+    typ, peak = statistics.median(vals), max(vals)
+    if peak < 1:
+        return f"{what} below 1 {unit}"
+    if round(typ) == round(peak) or peak < 1.5 * typ or peak - typ < 2:
+        return f"{what} around {round(peak):d} {unit}"
+    return f"{what} typically around {max(1, round(typ)):d} {unit}, locally up to {round(peak):d} {unit}"
+
+
+def hazard_paragraph_en(day, key, names, cells, min_level):
+    h = day["hazards"].get(key)
+    if not h:
+        return None
+    lv = h["level_grid"]
+    in_area = [(c[0], c[1]) for cs in cells.values() for c in cs]
+    present = sorted({lv[i][j] for i, j in in_area if lv[i][j] >= min_level}, reverse=True)
+    if not present:
+        return None
+    top = present[0]
+    area_top = [(i, j) for i, j in in_area if lv[i][j] >= top]
+    vals = [h["median_intensity"][i][j] for i, j in area_top]
+    probs = [h["probability_grid"][i][j] for i, j in area_top]
+    where = area_phrase_en(top, lv, cells)
+    what = PHENOMENON_EN[key][top]
+    text = [f"{ICON.get(top, '')} {TITLE_EN[key]} — level {names[top]}: {what} over {where}."]
+    details = []
+    inten = intensity_phrase_en(key, vals)
+    if inten:
+        details.append(inten)
+    p_typ = statistics.median(probs)
+    details.append(f"Occurrence at this level is {chance_word_en(p_typ)} (about {round(p_typ):d}% chance)")
+    text.append("  " + ". ".join(details) + ".")
+    if len(present) > 1:
+        low = present[-1]
+        w_low = area_phrase_en(low, lv, cells)
+        if w_low and w_low != where:
+            text.append(f"  The weaker signal (level {names[low]}) covers a wider area: {w_low}.")
+    return top, "\n".join(text)
+
+
+def trend_sentence_en(day, cells, names):
+    ups = downs = active = 0
+    ref = None
+    max_now = max_before = 0
+    for key in ORDER:
+        tr = (day["hazards"].get(key) or {}).get("trend")
+        if not tr:
+            continue
+        ref = ref or tr
+        lv = day["hazards"][key]["level_grid"]
+        diff = tr["change_grid"]
+        for cs in cells.values():
+            for (i, j, _, _) in cs:
+                now, was = lv[i][j], lv[i][j] - diff[i][j]
+                if now > 0 or was > 0:
+                    active += 1
+                    ups += now > was
+                    downs += now < was
+                max_now, max_before = max(max_now, now), max(max_before, was)
+    if ref is None:
+        return ""
+    utc = parse_iso(ref["reference_run"]).astimezone(timezone.utc)
+    head = f"Compared with the previous run ({utc:%H}Z, {round(ref['hours_earlier'])} h earlier)"
+    if not active:
+        return f"{head}, there are still no hazards."
+    if not ups and not downs:
+        return f"{head}, the forecast is essentially unchanged."
+    parts = []
+    if ups:
+        parts.append(f"hazard levels rose over {round(100 * ups / active)}% of the affected area")
+    if downs:
+        parts.append(f"hazard levels fell over {round(100 * downs / active)}% of the affected area")
+    s = f"{head}, " + " and ".join(parts)
+    if max_now != max_before:
+        s += f"; the highest level changed from {names[max_before]} to {names[max_now]}"
+    return s + "."
+
+
+def build_message_en(swwf, countries, min_level=1):
+    names = swwf["level_names"]
+    cells = cells_by_voivodeship(swwf["grid"], countries)   # ta sama procedura: pola siatki wg jednostek
+    day = swwf["days"][0]
+    issued = parse_iso(swwf["issued"])
+    nice = join_en([n for n, _ in countries])
+    out = ["SWWF — CENTRAL EUROPE WINTER HAZARD OUTLOOK, NEXT 24 HOURS (PROTOTYPE)",
+           f"Valid: {fmt_t_en(day['valid_from'])} → {fmt_t_en(day['valid_to'])}",
+           f"Area: {nice} · GEFS run {fmt_t_en(swwf['model_run'])} · issued {fmt_t_en(swwf['issued'])}",
+           ""]
+    paragraphs = []
+    for key in ORDER:
+        res = hazard_paragraph_en(day, key, names, cells, min_level)
+        if res:
+            paragraphs.append((res[0], ORDER.index(key), key, res[1]))
+    paragraphs.sort(key=lambda t: (-t[0], t[1]))
+    if not paragraphs:
+        out.append(f"SUMMARY: no winter hazards or significant precipitation are expected over {nice} "
+                   f"during the next 24 hours.")
+    else:
+        top = paragraphs[0][0]
+        lead = join_en([TITLE_EN[p[2]].lower() for p in paragraphs if p[0] == top])
+        tone = ("A serious hazard is forecast" if top >= 4 else
+                "A significant hazard is forecast" if top == 3 else
+                "An elevated hazard is forecast" if top == 2 else "The hazard is low")
+        out.append(f"SUMMARY: {tone} — the highest level is {names[top]} ({lead}).")
+        general = polish_max(day, "general_winter_risk", cells, names)
+        if general > top:
+            out.append(f"The combination of several hazards raises the overall winter risk to {names[general]}.")
+    out.append("")
+    for _, _, _, text in paragraphs:
+        out.append(text)
+        out.append("")
+    t = trend_sentence_en(day, cells, names)
+    if t:
+        out.append(t)
+        out.append("")
+    out.append("Own analysis of a 30-member GEFS ensemble — not an official warning. Amounts are indicative "
+               "(ensemble median); fresh-snow depth in cm tends to be overestimated.")
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("swwf", nargs="?", default="swwf.json")
-    ap.add_argument("--out", default="airmet.txt")
+    ap.add_argument("--out-pl", default="airmet_pl.txt")
+    ap.add_argument("--out-ce", default="airmet_ce.txt")
     args = ap.parse_args()
     with open(args.swwf, encoding="utf-8") as f:
         swwf = json.load(f)
     min_level = int(os.environ.get("AIRMET_MIN_LEVEL", "1"))
-    text = build_message(swwf, load_voivodeships(), min_level)
-    with open(args.out, "w", encoding="utf-8") as f:
-        f.write(text + "\n")
-    print(text)
+    pl = build_message_pl(swwf, load_voivodeships(), min_level)
+    ce = build_message_en(swwf, load_countries(), min_level)
+    for path, text in ((args.out_pl, pl), (args.out_ce, ce)):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+    print(pl)
+    print("\n" + "=" * 78 + "\n")
+    print(ce)
 
 
 if __name__ == "__main__":
