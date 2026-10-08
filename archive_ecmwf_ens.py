@@ -89,6 +89,11 @@ def file_url(base, run, step):
     return f"{base}/{run:%Y%m%d}/{run:%H}z/ifs/0p25/enfo/{stamp}-{step}h-enfo-ef.grib2"
 
 
+def index_url(base, run, step):
+    """Indeks ma to samo rdzenne imie co plik, ale rozszerzenie .index (NIE .grib2.index)."""
+    return file_url(base, run, step).rsplit(".grib2", 1)[0] + ".index"
+
+
 def http_get(url, headers=None, attempts=4, timeout=120):
     """Zwraca (status, bytes). 404/403 -> (status, None) bez ponawiania; inne błędy ponawia."""
     last = None
@@ -107,13 +112,16 @@ def http_get(url, headers=None, attempts=4, timeout=120):
     raise RuntimeError(f"{url}: {last}")
 
 
-def pick_base(run):
-    """Pierwsze źródło, które ma indeks ostatniego kroku (przebieg kompletny)."""
+def pick_base(run, verbose=False):
+    """Pierwsze zrodlo, ktore ma indeks ostatniego kroku (przebieg kompletny)."""
     for base in BASES:
+        url = index_url(base, run, STEPS[-1])
         try:
-            _status, raw = http_get(file_url(base, run, STEPS[-1]) + ".index", attempts=1, timeout=30)
-        except Exception:
-            continue
+            status, raw = http_get(url, attempts=1, timeout=30)
+        except Exception as e:
+            status, raw = f"blad: {type(e).__name__}", None
+        if verbose:
+            print(f"  sonda {base.split('/')[2]}: {status}  ({url.split('/', 3)[3]})", flush=True)
         if raw is not None:
             return base
     return None
@@ -121,8 +129,10 @@ def pick_base(run):
 
 def wait_for_run(run, minutes):
     deadline = time.time() + minutes * 60
+    first = True
     while True:
-        base = pick_base(run)
+        base = pick_base(run, verbose=first)
+        first = False
         if base:
             return base
         if time.time() >= deadline:
@@ -133,7 +143,7 @@ def wait_for_run(run, minutes):
 
 def read_index(base, run, step):
     """Lista wiadomości do pobrania dla kroku: (param, członek, offset, długość)."""
-    st, raw = http_get(file_url(base, run, step) + ".index")
+    st, raw = http_get(index_url(base, run, step))
     if raw is None:
         return None
     out = []
@@ -186,7 +196,7 @@ def fetch_message(base, run, step, param, member, offset, length):
 def main():
     t0 = time.time()
     run = parse_run(sys.argv)
-    wait_minutes = float(os.environ.get("ECMWF_WAIT_MINUTES", "60"))
+    wait_minutes = float(os.environ.get("ECMWF_WAIT_MINUTES", "6" if TEST else "60"))
     out_path = os.path.join(OUT_DIR, f"{run:%Y-%m-%d_%H}z.json.gz")
     print(f"IFS ENS — przebieg {run:%Y-%m-%d %H}Z UTC, punktów: {len(POINTS)}, kroków: {len(STEPS)}, "
           f"członków: {MEMBERS_LIMIT}" + (" [TEST]" if TEST else ""))
