@@ -51,7 +51,7 @@ PARAMS = {
 ESSENTIAL = ("2t", "tp")
 TEST = os.environ.get("ECMWF_TEST", "").strip() not in ("", "0")
 STEPS = [0, 6] if TEST else list(range(0, 73, 3))
-MEMBERS_LIMIT = 3 if TEST else 51
+MEMBERS_LIMIT = 3 if TEST else 200      # ograniczenie tylko w trybie testowym
 WORKERS = int(os.environ.get("ECMWF_WORKERS", "16"))
 MAX_MISSING_FRACTION = 0.02
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ecmwf_archive_test" if TEST else "ecmwf_archive")
@@ -141,8 +141,9 @@ def wait_for_run(run, minutes):
         time.sleep(180)
 
 
-def read_index(base, run, step):
-    """Lista wiadomości do pobrania dla kroku: (param, członek, offset, długość)."""
+def read_index(base, run, step, info=None):
+    """Lista wiadomości do pobrania dla kroku: (param, członek, offset, długość).
+    `info` (opcjonalny słownik) dostaje podgląd zawartości indeksu do diagnostyki."""
     st, raw = http_get(index_url(base, run, step))
     if raw is None:
         return None
@@ -152,6 +153,8 @@ def read_index(base, run, step):
         if not line:
             continue
         d = json.loads(line)
+        if info is not None and d.get("levtype") == "sfc":
+            info.setdefault("types", {}).setdefault(d.get("type"), set()).add(d.get("param"))
         if d.get("levtype") != "sfc" or d.get("param") not in PARAMS:
             continue
         if d.get("type") == "cf":
@@ -159,8 +162,6 @@ def read_index(base, run, step):
         elif d.get("type") == "pf":
             member = int(d.get("number"))
         else:
-            continue
-        if member >= MEMBERS_LIMIT:
             continue
         out.append((d["param"], member, int(d["_offset"]), int(d["_length"])))
     return out
@@ -208,7 +209,7 @@ def main():
     wait_minutes = float(os.environ.get("ECMWF_WAIT_MINUTES", "6" if TEST else "60"))
     out_path = os.path.join(OUT_DIR, f"{run:%Y-%m-%d_%H}z.json.gz")
     print(f"IFS ENS — przebieg {run:%Y-%m-%d %H}Z UTC, punktów: {len(POINTS)}, kroków: {len(STEPS)}, "
-          f"członków: {MEMBERS_LIMIT}" + (" [TEST]" if TEST else ""))
+          f"członków: " + ("do 3 [TEST]" if TEST else "wg indeksu"))
     if not TEST and os.path.exists(out_path):
         print(f"Już zarchiwizowane: {out_path} — pomijam.")
         return
@@ -218,22 +219,30 @@ def main():
                  "Uruchom ponownie później.")
     print(f"Źródło: {base.split('/')[2]}")
 
-    jobs, plan = [], {}
+    plan, info = {}, {}
     for step in STEPS:
-        idx = read_index(base, run, step)
+        idx = read_index(base, run, step, info if step == STEPS[-1] else None)
         if idx is None:
             sys.exit(f"Brak indeksu kroku {step} h.")
         plan[step] = idx
-        for param, member, off, ln in idx:
-            jobs.append((step, param, member, off, ln))
-    print(f"Wiadomości do pobrania: {len(jobs)}", flush=True)
+    # czlonkowie bierzemy z indeksu (kontrolny moze nie byc w tym pliku); w tescie tylko pierwsi kilku
+    all_members = sorted({m for step in plan for (_, m, _, _) in plan[step]})
+    if not all_members:
+        sys.exit("Indeks nie zawiera żadnych oczekiwanych wiadomości (sfc: 2t, tp, sf).")
+    members = all_members[:MEMBERS_LIMIT]
+    jobs = [(step, param, member, off, ln) for step in STEPS for (param, member, off, ln) in plan[step]
+            if member in members]
+    print(f"Członkowie w indeksie: {len(all_members)} (od {all_members[0]} do {all_members[-1]}), "
+          f"używam: {len(members)}; wiadomości do pobrania: {len(jobs)}", flush=True)
     if TEST:                                   # podglad indeksu, zeby widziec co serwer faktycznie zawiera
+        print("  typy wiadomości sfc w indeksie ostatniego kroku: " + "; ".join(
+            f"{t}: {sorted(p)}" for t, p in sorted(info.get("types", {}).items(), key=lambda x: str(x[0]))), flush=True)
         for step in STEPS:
             counts = {}
             for param, member, off, ln in plan[step]:
                 counts.setdefault(param, []).append(member)
             print(f"  indeks, krok {step} h: " + "; ".join(
-                f"{p}: czlonkowie {sorted(set(m))}, {len(m)} szt." for p, m in sorted(counts.items())), flush=True)
+                f"{p}: {len(m)} szt." for p, m in sorted(counts.items())), flush=True)
 
     results = {}
     failures = {}
@@ -254,7 +263,6 @@ def main():
             if done % 500 == 0:
                 print(f"  pobrano {done}/{len(jobs)}  ({STATS['bytes'] / 1e6:.0f} MB)", flush=True)
 
-    members = list(range(MEMBERS_LIMIT))
     missing = []
     for step in STEPS:
         for param in PARAMS:
@@ -320,11 +328,11 @@ def main():
     print(f"Zapisano: {out_path} ({size_kb:.0f} KB), brakujących wiadomości: {len(missing)}")
     print(f"Pobrano {STATS['bytes'] / 1e6:.0f} MB w {STATS['requests']} zapytaniach, czas {elapsed:.0f} s")
     if TEST:
-        full_msgs = 25 * len(PARAMS) * 51
+        full_msgs = 25 * len(PARAMS) * len(all_members)
         factor = full_msgs / max(len(jobs), 1)
-        print(f"SZACUNEK pełnego przebiegu (25 kroków x 51 członków x {len(PARAMS)} pola): "
+        print(f"SZACUNEK pełnego przebiegu (25 kroków x {len(all_members)} członków x {len(PARAMS)} pola): "
               f"~{STATS['bytes'] * factor / 1e9:.1f} GB, ~{elapsed * factor / 60:.0f} min "
-              f"(czas bez czekania na serwer; plik wynikowy ok. {size_kb * 51 / MEMBERS_LIMIT * 25 / len(STEPS):.0f} KB)")
+              f"(czas bez czekania na serwer; plik wynikowy ok. {size_kb * len(all_members) / len(members) * 25 / len(STEPS):.0f} KB)")
 
 
 if __name__ == "__main__":
