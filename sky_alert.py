@@ -94,9 +94,9 @@ def text_from_html(s):
 
 
 def title_and_desc(content):
-    m = re.search(r'class="[^"]*warntable_title[^"]*"[^>]*>(.*?)</t[dh]>', content, re.S | re.I)
+    m = re.search(r'class=["\'][^"\']*warntable_title[^"\']*["\'][^>]*>(.*?)</t[dh]>', content, re.S | re.I)
     title = text_from_html(m.group(1)) if m else ""
-    m = re.search(r'class="[^"]*warntable_td[^"]*"[^>]*>(.*?)</t[dh]>', content, re.S | re.I)
+    m = re.search(r'class=["\'][^"\']*warntable_td[^"\']*["\'][^>]*>(.*?)</t[dh]>', content, re.S | re.I)
     desc = text_from_html(m.group(1)) if m else ""
     desc = re.sub(r"To\s+jest\s+komentarz\.?", "", desc, flags=re.I).strip()
     return title, desc
