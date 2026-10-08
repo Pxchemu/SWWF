@@ -1,0 +1,49 @@
+name: SWWF - komunikat tekstowy (prototyp)
+
+on:
+  workflow_dispatch:   # na razie tylko reczne uruchomienie - prototyp, bez harmonogramu
+    inputs:
+      min_level:
+        description: 'Najnizszy poziom w komunikacie (1=SLIGHT, 2=ENHANCED, 3=MODERATE...)'
+        required: false
+        default: '1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: swwf-airmet
+  cancel-in-progress: false
+
+jobs:
+  airmet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install shapely
+
+      - name: Zbuduj komunikat z swwf.json
+        env:
+          AIRMET_MIN_LEVEL: ${{ inputs.min_level }}
+        run: python swwf_airmet.py swwf.json --out airmet.txt
+
+      - name: Zapisz airmet.txt do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add airmet.txt voivodeships_pl.geojson
+          git diff --staged --quiet && exit 0
+          git commit -m "Komunikat tekstowy SWWF (prototyp)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
