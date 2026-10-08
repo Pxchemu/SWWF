@@ -1,0 +1,62 @@
+name: SWWF - archiwizuj IFS ENS (ECMWF)
+
+on:
+  workflow_dispatch:   # reczne uruchomienie / test
+    inputs:
+      run:
+        description: 'Przebieg do pobrania "RRRR-MM-DD GG" (UTC, GG = 00 lub 12; tylko z ostatnich 2-3 dob). Puste = automatycznie'
+        required: false
+        default: ''
+      test:
+        description: 'TEST: tylko 2 kroki i 3 czlonkow, nic nie trafia do repo; drukuje oszacowanie rozmiaru i czasu pelnego przebiegu'
+        type: boolean
+        default: true
+  schedule:
+    # dwa razy dziennie, ok. 8,5-9 h po przebiegach 00/12Z (otwarte dane ENS pojawiaja sie ~7-8 h po czasie
+    # nominalnym), kazde okno z zapasowym podejsciem godzine pozniej (harmonogram Actions bywa pomijany).
+    # Skrypt pomija przebieg, ktory jest juz zapisany, wiec dodatkowe uruchomienia nic nie dubluja.
+    - cron: '47 8,9,20,21 * * *'
+
+permissions:
+  contents: write
+
+# jeden przebieg archiwizacji naraz (nie przerywamy trwajacego)
+concurrency:
+  group: archive-ecmwf-ens
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      ECMWF_RUN: ${{ inputs.run }}
+      ECMWF_TEST: ${{ inputs.test && '1' || '' }}
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install eccodes requests
+
+      - name: Pobierz i zapisz prognoze IFS ENS
+        run: python archive_ecmwf_ens.py "$ECMWF_RUN"
+
+      - name: Zapisz wynik do repo
+        if: ${{ env.ECMWF_TEST == '' }}
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add ecmwf_archive/
+          git diff --staged --quiet && exit 0
+          git commit -m "Archiwum IFS ENS"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
