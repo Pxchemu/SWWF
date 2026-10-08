@@ -1,4 +1,4 @@
-name: SWWF - komunikat tekstowy (prototyp)
+name: SWWF - komunikaty tekstowe (prototyp - Polska PL i Europa Srodkowa EN)
 
 on:
   workflow_dispatch:   # na razie tylko reczne uruchomienie - prototyp, bez harmonogramu
@@ -30,18 +30,18 @@ jobs:
       - name: Zainstaluj biblioteki
         run: pip install shapely
 
-      - name: Zbuduj komunikat z swwf.json
+      - name: Zbuduj komunikaty z swwf.json
         env:
           AIRMET_MIN_LEVEL: ${{ inputs.min_level }}
-        run: python swwf_airmet.py swwf.json --out airmet.txt
+        run: python swwf_airmet.py swwf.json --out-pl airmet_pl.txt --out-ce airmet_ce.txt
 
-      - name: Zapisz airmet.txt do repo
+      - name: Zapisz komunikaty do repo
         run: |
           git config user.name "SWWF Bot"
           git config user.email "actions@github.com"
-          git add airmet.txt voivodeships_pl.geojson
+          git add airmet_pl.txt airmet_ce.txt voivodeships_pl.geojson countries_ce.geojson
           git diff --staged --quiet && exit 0
-          git commit -m "Komunikat tekstowy SWWF (prototyp)"
+          git commit -m "Komunikaty tekstowe SWWF (prototyp)"
           for i in 1 2 3 4 5; do
             git pull --rebase -X theirs origin main && git push && exit 0
             sleep 5
