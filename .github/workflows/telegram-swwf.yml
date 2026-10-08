@@ -1,7 +1,8 @@
-name: Telegram - wyslij prognoze SWWF
+name: Telegram - depesza poranna SWWF (PL i EN)
 
 on:
-  # automatycznie po kazdym udanym wygenerowaniu prognozy
+  # po kazdym udanym wygenerowaniu prognozy; skrypt sam wysyla depesze tylko RAZ DZIENNIE,
+  # po pierwszej nowej prognozie danego dnia (data wydania wg czasu polskiego)
   workflow_run:
     workflows: ["SWWF - generuj prognoze"]
     types: [completed]
@@ -9,11 +10,16 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Wyslij niezaleznie od tego, czy cos sie zmienilo (test)'
+        description: 'Wyslij niezaleznie od tego, czy dzis juz wyslano (test)'
         type: boolean
         default: true
+      mode:
+        description: 'morning = depesza poranna PL+EN z mapami (domyslnie); changes = stary tryb: wysylka po zmianie poziomow'
+        type: choice
+        options: [morning, changes]
+        default: morning
       hazard:
-        description: 'Hazard na mapach (general_winter_risk, snow_24h_cm, cold_min_t2m_c, snow_squalls, precip_24h_mm = test w sezonie bez zimy)'
+        description: 'Tylko tryb changes: hazard na mapie (general_winter_risk, snow_24h_cm, cold_min_t2m_c, snow_squalls, precip_24h_mm)'
         required: false
         default: 'general_winter_risk'
 
@@ -32,7 +38,9 @@ jobs:
     timeout-minutes: 15
     env:
       TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+      TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}           # odbiorcy depeszy PL
+      TG_CHAT_IDS_EN: ${{ secrets.TELEGRAM_CHAT_IDS_EN }}     # odbiorcy depeszy EN (Europa Srodkowa)
+      TG_MODE: ${{ inputs.mode }}                             # puste przy automatycznym uruchomieniu = morning
       TG_HAZARD: ${{ inputs.hazard }}
       TG_FORCE: ${{ inputs.force && '1' || '' }}
       TG_LINK: ${{ vars.TELEGRAM_LINK }}
@@ -53,7 +61,7 @@ jobs:
       - name: Zainstaluj czcionki (Inter, Archivo - jak na stronie; tylko na czas dzialania, nie trafia do repo)
         run: npm install --no-save --no-package-lock --silent @expo-google-fonts/inter @expo-google-fonts/archivo || echo "Bez czcionek - uzyje domyslnej"
 
-      - name: Narysuj mapy i wyslij
+      - name: Zbuduj depesze, narysuj mapy (tylko z zagrozeniem) i wyslij
         run: python swwf_telegram.py --out-dir swwf_maps
 
       - name: Zapisz stan wysylki
