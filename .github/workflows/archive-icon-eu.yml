@@ -11,7 +11,10 @@ on:
     # cztery razy dziennie, ~4,5 h po przebiegach ICON-EU 00/06/12/18Z (DWD publikuje pliki
     # ok. 2,5-3,5 h po czasie przebiegu). Skrypt sam wylicza, o ktory przebieg chodzi, i czeka
     # do godziny, jesli pliki jeszcze nie sa komplet.
-    - cron: '30 4,10,16,22 * * *'
+    # Harmonogram GitHub Actions bywa spozniony albo pomijany, a archiwum ICON-EU nie da sie odtworzyc
+    # wstecz — dlatego kazde okno ma zapasowe podejscie godzine pozniej (nieokragla minuta). Skrypt
+    # pomija przebieg, ktory jest juz zapisany, wiec dodatkowe uruchomienia nic nie dubluja.
+    - cron: '17 4,5,10,11,16,17,22,23 * * *'
 
 permissions:
   contents: write
