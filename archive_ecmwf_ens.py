@@ -186,11 +186,20 @@ def read_points(grib_bytes, points):
 
 
 def fetch_message(base, run, step, param, member, offset, length):
+    """Zwraca (wartosci_w_punktach | None, powod_niepowodzenia | None)."""
     url = file_url(base, run, step)
-    st, raw = http_get(url, headers={"Range": f"bytes={offset}-{offset + length - 1}"})
-    if raw is None or len(raw) != length:
-        return None
-    return read_points(raw, POINTS)
+    try:
+        status, raw = http_get(url, headers={"Range": f"bytes={offset}-{offset + length - 1}"})
+    except Exception as e:
+        return None, f"siec: {str(e)[-120:]}"
+    if raw is None:
+        return None, f"HTTP {status}"
+    if len(raw) != length:
+        return None, f"dlugosc {len(raw)} != {length} (HTTP {status})"
+    try:
+        return read_points(raw, POINTS), None
+    except Exception as e:
+        return None, f"GRIB: {type(e).__name__}: {str(e)[:100]}"
 
 
 def main():
@@ -218,15 +227,25 @@ def main():
         for param, member, off, ln in idx:
             jobs.append((step, param, member, off, ln))
     print(f"Wiadomości do pobrania: {len(jobs)}", flush=True)
+    if TEST:                                   # podglad indeksu, zeby widziec co serwer faktycznie zawiera
+        for step in STEPS:
+            counts = {}
+            for param, member, off, ln in plan[step]:
+                counts.setdefault(param, []).append(member)
+            print(f"  indeks, krok {step} h: " + "; ".join(
+                f"{p}: czlonkowie {sorted(set(m))}, {len(m)} szt." for p, m in sorted(counts.items())), flush=True)
 
     results = {}
+    failures = {}
     grid_info = None
     done = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         futs = {ex.submit(fetch_message, base, run, s, p, m, o, l): (s, p, m) for s, p, m, o, l in jobs}
         for fut in as_completed(futs):
             key = futs[fut]
-            vals = fut.result()
+            vals, reason = fut.result()
+            if vals is None:
+                failures[key] = reason
             if vals is not None:
                 results[key] = [x[0] for x in vals]
                 if grid_info is None:
@@ -245,10 +264,18 @@ def main():
                 if (step, param, m) not in results:
                     missing.append(f"{param}@{step}#{m}")
     total = sum(1 for s in STEPS for p in PARAMS for _ in members if not (s == 0 and p in ("tp", "sf")))
+    if failures:
+        print(f"Niepowodzenia pobierania: {len(failures)} (pierwsze 8):")
+        for key, why in list(failures.items())[:8]:
+            print(f"  krok {key[0]} h, {key[1]}, czlonek {key[2]}: {why}")
     for param in ESSENTIAL:
         lack = [x for x in missing if x.startswith(param + "@")]
         if len(lack) > MAX_MISSING_FRACTION * (total / len(PARAMS)):
-            sys.exit(f"Za dużo brakujących wiadomości zmiennej {param} ({len(lack)}) — nie zapisuję niekompletnej paczki.")
+            msg = f"Za dużo brakujących wiadomości zmiennej {param} ({len(lack)}) — nie zapisuję niekompletnej paczki."
+            if TEST:
+                print("UWAGA (test, kontynuuję): " + msg)
+            else:
+                sys.exit(msg)
     if grid_info is None:
         sys.exit("Brak jakichkolwiek danych.")
 
