@@ -651,6 +651,57 @@ def section_snow_cm(runs, obs):
     say()
 
 
+# sigma całkowita (RMSE po korekcie liniowej) z sekcji 7 raportu dla wyprzedzenia k=0/1/2 — te same stałe trafią do generatora
+COLD_SIGMA_TOTAL_BY_K = {0: 2.35, 1: 2.59, 2: 2.78}
+
+
+def section_cold_spread(runs, obs):
+    """Mróz: wygładzenie rozrzutu DOKŁADNIE jak w planowanym kodzie produkcyjnym. P(T <= próg) = średnia po członkach z
+    Phi((próg - (T_czł + korekta)) / s), gdzie s = w * sqrt(max(sigma_całk(k)^2 - rozrzut_zespołu^2, 0.25)).
+    Oceniamy kilka progów P (produkcyjna macierz zaczyna się od ok. 10%) i kilka wag w (0 = bez wygładzenia = produkcja)."""
+    say("## 11. Mróz — test wygładzenia rozrzutu odtwarzający planowaną zmianę produkcyjną (stałe sigma wg wyprzedzenia)")
+    say(f"Sigma całkowita wg wyprzedzenia: {COLD_SIGMA_TOTAL_BY_K}. Środek = temperatura członka + korekta produkcyjna {COLD_AIR_BIAS_PROD:+.1f} C. "
+        "w = waga wygładzenia (0 = obecna produkcja). Doby bez zdarzenia = zdarzenie (TMIN <= próg) na <= 1 stacji. "
+        "'fałsz. bez zdarz.' = fałszywe alarmy na 1000 stacjodni z tych dób.")
+    from math import erf
+    ncdf = np.vectorize(lambda z: 0.5 * (1.0 + erf(z / 2 ** 0.5)))
+    def extra(A, w):
+        te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
+        return {"air": np.minimum(np.nanmin(te, axis=2), np.nanmin(tm, axis=2))}
+    weights = (0.0, 0.5, 0.75, 1.0)
+    pthrs = (0.1, 0.2, 0.3, 0.5)
+    for k in (0, 1, 2):
+        s = build_sample(runs, obs, k, 0, extra)
+        if s.n == 0:
+            continue
+        TM = s.obs("TMIN"); ok = np.isfinite(TM)
+        air = s.M["air"][ok]; TM = TM[ok]; meta = [m for m, g in zip(s.meta, ok) if g]
+        runs_id = np.array([m[0].toordinal() for m in meta])
+        sd = air.std(axis=1)
+        centre = air + COLD_AIR_BIAS_PROD
+        base_s = np.sqrt(np.maximum(COLD_SIGMA_TOTAL_BY_K[k] ** 2 - sd ** 2, 0.25))
+        say(f"### wyprzedzenie k={k}: n={len(TM)}, sigma całkowita {COLD_SIGMA_TOTAL_BY_K[k]:.2f} C, średni dodany rozrzut {base_s.mean():.2f} C")
+        for thr in (-5, -10, -15):
+            ev = TM <= thr
+            if ev.sum() < 5:
+                continue
+            nev = {r: int(ev[runs_id == r].sum()) for r in np.unique(runs_id)}
+            free = np.array([nev[r] <= 1 for r in runs_id]); nfree = max(int(free.sum()), 1)
+            say(f"- próg {thr} C (zdarzeń {int(ev.sum())}):")
+            for wgt in weights:
+                if wgt == 0.0:
+                    p = (centre <= thr).mean(axis=1)
+                else:
+                    p = ncdf((thr - centre) / (wgt * base_s)[:, None]).mean(axis=1)
+                parts = []
+                for pt in pthrs:
+                    h, fa, m_, pod, far, csi = contingency(p, ev, pt)
+                    ff = int(((p >= pt) & ~ev & free).sum())
+                    parts.append(f"P>={int(pt * 100)}%: POD {pod:.2f} FAR {far:.2f} CSI {csi:.2f} fałsz. bez zdarz. {ff / nfree * 1000:.1f}")
+                say(f"    w={wgt:.2f}{' (produkcja)' if wgt == 0.0 else ''}: " + " | ".join(parts))
+    say()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hindcast", default="hindcast_v2")
@@ -687,6 +738,7 @@ def main():
     section_snow_cal(runs, obs)
     section_snow_ratio(obs)
     section_snow_cm(runs, obs)
+    section_cold_spread(runs, obs)
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
