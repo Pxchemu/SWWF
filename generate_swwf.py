@@ -528,8 +528,89 @@ def combine_general_risk(snow_idx, cold_idx, squall_idx):
     return general_idx.tolist()
 
 
+# --- TREND: zmiana prognozy względem poprzedniego przebiegu -----------------------------------
+# Dla każdego hazardu i doby porównujemy poziom zagrożenia (level_grid) z poprzednim wydaniem
+# (swwf.json sprzed nadpisania). Doby liczą się od czasu przebiegu, więc przebieg sprzed 6 h ma
+# dobę przesuniętą o 6 h: dobieramy dobę poprzedniego przebiegu o numerze d + round(przesunięcie/24)
+# i bierzemy ją tylko, gdy okna czasowe pokrywają się w >= TREND_MIN_OVERLAP (przy 6 h: 75%,
+# przy 24 h: 100% — wtedy Dzień d porównujemy z Dniem d+1 poprzedniego przebiegu).
+TREND_MIN_OVERLAP = 0.5
+TREND_HAZARDS = ("precip_24h_mm", "snow_24h_cm", "cold_min_t2m_c", "snow_squalls", "general_winter_risk")
+_ISO_FMT = "%Y-%m-%dT%H:%M:%S%z"
+
+
+def load_previous_result(path="swwf.json"):
+    """Poprzednie wydanie (przed nadpisaniem) albo None, gdy go nie ma / jest nieczytelne."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            prev = json.load(f)
+        if not isinstance(prev, dict) or not prev.get("days") or not prev.get("model_run"):
+            return None
+        return prev
+    except (OSError, ValueError):
+        return None
+
+
+def compute_trend_blocks(days_out, run_time, prev):
+    """Dla każdej doby zwraca {klucz_hazardu: blok_trendu} albo {} gdy brak sensownego odniesienia.
+
+    Ten sam przebieg co poprzednio (ponowne uruchomienie): przepisujemy bloki trendu z poprzedniego
+    wydania, żeby ręczne ponowienie nie kasowało informacji o zmianie."""
+    blocks = [dict() for _ in days_out]
+    if prev is None:
+        return blocks
+    try:
+        prev_run = datetime.strptime(prev["model_run"], _ISO_FMT).astimezone(timezone.utc)
+    except (KeyError, ValueError):
+        return blocks
+    offset_h = (run_time - prev_run).total_seconds() / 3600.0
+    if abs(offset_h) < 1e-6:
+        for d, day in enumerate(days_out):
+            if d < len(prev["days"]):
+                for key, h in prev["days"][d].get("hazards", {}).items():
+                    if h.get("trend"):
+                        blocks[d][key] = h["trend"]
+        return blocks
+    if offset_h < 0:   # poprzednie wydanie z NOWSZEGO przebiegu (np. ręczny przebieg wstecz) — brak trendu
+        return blocks
+    shift = int(round(offset_h / 24.0))
+    overlap = 1.0 - abs(offset_h - 24.0 * shift) / 24.0
+    if overlap < TREND_MIN_OVERLAP:
+        return blocks
+    for d, day in enumerate(days_out):
+        pd_idx = d + shift
+        if pd_idx >= len(prev["days"]):
+            continue
+        prev_hazards = prev["days"][pd_idx].get("hazards", {})
+        for key in TREND_HAZARDS:
+            cur_h, old_h = day["hazards"].get(key), prev_hazards.get(key)
+            if not cur_h or not old_h or "level_grid" not in old_h:
+                continue
+            cur = np.array(cur_h["level_grid"], dtype=int)
+            old = np.array(old_h["level_grid"], dtype=int)
+            if cur.shape != old.shape:
+                continue
+            diff = cur - old
+            active = (cur > 0) | (old > 0)
+            blocks[d][key] = {
+                "reference_run": prev["model_run"],
+                "reference_day_label": prev["days"][pd_idx].get("label"),
+                "hours_earlier": round(offset_h, 1),
+                "overlap_pct": int(round(overlap * 100)),
+                "change_grid": diff.tolist(),
+                "cells_active": int(active.sum()),
+                "cells_up": int((diff > 0).sum()),
+                "cells_down": int((diff < 0).sum()),
+                "max_level_now": int(cur.max()),
+                "max_level_before": int(old.max()),
+            }
+    return blocks
+
+
+
 def main():
     run_time = find_latest_run()
+    previous_result = load_previous_result()
     print(f"Używam przebiegu: {run_time.isoformat()}")
 
     print("Pobieram granice lądu (Natural Earth)...")
@@ -707,6 +788,13 @@ def main():
             },
         })
         print(f"  {day_info['label']}: sklasyfikowano i wygenerowano polygony")
+
+    trend_blocks = compute_trend_blocks(days_out, run_time, previous_result)
+    for d_idx, day in enumerate(days_out):
+        for key, block in trend_blocks[d_idx].items():
+            day["hazards"][key]["trend"] = block
+    n_tr = sum(len(b) for b in trend_blocks)
+    print(f"Trend względem poprzedniego przebiegu: {n_tr} bloków" if n_tr else "Trend: brak odniesienia (pierwszy przebieg / zbyt duże przesunięcie)")
 
     result = {
         "issued": to_warsaw_iso(datetime.now(timezone.utc)),
