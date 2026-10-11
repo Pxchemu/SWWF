@@ -77,7 +77,13 @@ except Exception:
     POINTS = [("WARSZAWA", "Warszawa-Okęcie", 52.17, 20.97), ("KRAKOW", "Kraków-Balice", 50.08, 19.80),
               ("GDANSK", "Gdańsk-Rębiechowo", 54.38, 18.47), ("WROCLAW", "Wrocław-Strachowice", 51.10, 16.89)]
 
-STATS = {"bytes": 0, "requests": 0, "retries": 0}
+STATS = {"bytes": 0, "requests": 0, "retries": 0, "google_ok": 0}
+# Lustro Google (ta sama struktura katalogow i pliki co AWS, osobna infrastruktura = osobne limity ruchu).
+# AWS czesto zwraca 503 "Slow Down", wiec zapytania rozkladamy na oba zrodla, a po bledzie przechodzimy na drugie.
+AWS_BASE = "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"
+GOOGLE_BASE = "https://storage.googleapis.com/ecmwf-open-data"
+FAILOVER = os.environ.get("ECMWF_FAILOVER", "1") != "0"                     # 0 = tylko AWS (jak dawniej)
+GOOGLE_SHARE = float(os.environ.get("ECMWF_GOOGLE_SHARE", "0.5"))          # ulamek zapytan zaczynanych od Google
 BACKOFF_BASE = float(os.environ.get("ECMWF_BACKOFF", "5"))   # s; pierwsza przerwa po bledzie, potem x2 (max 60 s)
 
 
@@ -109,25 +115,45 @@ def index_url(base, run, step):
     return file_url(base, run, step).rsplit(".grib2", 1)[0] + ".index"
 
 
+def _variants(url):
+    """Adresy tego samego pliku w kolejnosci prob: [AWS, Google] albo [Google, AWS] (losowo wg GOOGLE_SHARE)."""
+    if FAILOVER and url.startswith(AWS_BASE):
+        v = [url, GOOGLE_BASE + url[len(AWS_BASE):]]
+        if random.random() < GOOGLE_SHARE:
+            v.reverse()
+        return v
+    return [url]
+
+
 def http_get(url, headers=None, attempts=7, timeout=120):
-    """Zwraca (status, bytes). 404/403 -> (status, None) bez ponawiania; inne błędy ponawia.
-    S3 ECMWF bywa chwilowo przeciążony (503 SlowDown / 429) — wtedy czekamy coraz dłużej
-    (5, 10, 20, 40, 60, 60 s, z losowym rozrzutem +-40%), zamiast poddawać się po kilkunastu sekundach."""
-    last = None
-    for i in range(attempts):
+    """Zwraca (status, bytes). 404/403 na wszystkich zrodlach -> (status, None) bez ponawiania; inne bledy ponawia.
+    Po bledzie od razu probuje drugiego lustra (AWS <-> Google); przerwa dopiero gdy zawiodly oba:
+    BACKOFF_BASE, x2, ... (max 60 s, z losowym rozrzutem +-40%). `attempts` = liczba rund (kazda runda = oba zrodla)."""
+    live = _variants(url)
+    max_fails = attempts * len(live)
+    fails, k, last = 0, 0, None
+    while fails < max_fails:
+        u = live[k % len(live)]
         try:
-            r = requests.get(url, headers={**HEADERS, **(headers or {})}, timeout=timeout)
+            r = requests.get(u, headers={**HEADERS, **(headers or {})}, timeout=timeout)
             STATS["requests"] += 1
             if r.status_code in (403, 404):
-                return r.status_code, None
+                live.remove(u)                      # tego zrodla nie ma / brak dostepu - zostaje drugie
+                if not live:
+                    return r.status_code, None
+                continue
             r.raise_for_status()
             STATS["bytes"] += len(r.content)
+            if u.startswith(GOOGLE_BASE):
+                STATS["google_ok"] += 1
             return r.status_code, r.content
         except Exception as e:
             last = e
             STATS["retries"] += 1
-            if i < attempts - 1:
-                time.sleep(min(60, BACKOFF_BASE * 2 ** i) * random.uniform(0.6, 1.4))   # jitter: watki nie ponawiaja jednoczesnie
+            fails += 1
+            k += 1
+            if fails < max_fails and k % len(live) == 0:
+                time.sleep(min(60, BACKOFF_BASE * 2 ** max(0, fails // len(live) - 1)) * random.uniform(0.6, 1.4))
     raise RuntimeError(f"{url}: {last}")
 
 
