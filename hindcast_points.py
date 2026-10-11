@@ -236,13 +236,28 @@ def merge(chunks_dir, out_dir):
             docs = [json.load(gzip.open(path, "rt", encoding="utf-8"))] + docs
         base = docs[-1]
         per_member = {}            # członek -> {pole: [stacja][okno]}
+        all_fields = {}
+        for d in docs:
+            all_fields.update(d["fields"])
+
+        def has_data(block):
+            return any(x is not None for row in block for x in row)
+
         for d in docs:
             for i, m in enumerate(d["members"]):
-                per_member[m] = {k: d["data"][k][i] for k in d["fields"]}
+                rec = per_member.setdefault(m, {})
+                for k in d["fields"]:
+                    # pole bez żadnych danych w nowszym kawałku (np. drugi przebieg bez dodatkowych zmiennych)
+                    # nie kasuje wcześniej zapisanych wartości -> kolejne przebiegi DOKŁADAJĄ pola
+                    if k not in rec or has_data(d["data"][k][i]):
+                        rec[k] = d["data"][k][i]
         members = sorted(per_member)
-        merged = {k: base[k] for k in ("run", "windows", "stations", "fields")}
+        merged = {k: base[k] for k in ("run", "windows", "stations")}
+        merged["fields"] = all_fields
         merged["members"] = members
-        merged["data"] = {k: [per_member[m][k] for m in members] for k in base["fields"]}
+        nw = len(base["windows"]); ns = len(base["stations"])
+        empty = [[None] * nw for _ in range(ns)]
+        merged["data"] = {k: [per_member[m].get(k, empty) for m in members] for k in all_fields}
         miss = {}
         for d in docs:
             for k, v in d["missing"].items():
