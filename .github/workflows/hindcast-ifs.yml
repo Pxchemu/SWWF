@@ -7,9 +7,9 @@ on:
         description: 'Przebiegi IFS ENS po przecinku, "RRRR-MM-DD GG" (UTC; GG = 00 lub 12; od 2024-03; pelny zestaw zmiennych od 2024-11-15), np. 2025-01-15 00,2025-01-16 00'
         required: true
       chunk_size:
-        description: 'Ilu czlonkow na jedno zadanie (51 czlonkow: 0 = kontrolny, 1-50; 12 = 5 zadan na przebieg; GitHub dopuszcza max 256 zadan w jednym uruchomieniu, wiec przy 40 przebiegach uzyj 12 lub wiecej)'
+        description: 'Ilu czlonkow na jedno zadanie (51 czlonkow: 0 = kontrolny, 1-50). 26 = 2 zadania na przebieg (zalecane: kazde zadanie czyta ~26 indeksow ECMWF, a to one najczesciej dostaja 503, wiec im mniej zadan, tym mniej ryzyka); 12 = 5 zadan na przebieg. GitHub dopuszcza max 256 zadan w jednym uruchomieniu'
         required: true
-        default: '12'
+        default: '26'
       extras:
         description: 'Pobierac tez 2d, 10u, 10v, mn2t3, mx2t3, 10fg, mucape, ptype (kilka razy wiecej danych; domyslnie tylko 2t i tp)'
         type: boolean
@@ -52,7 +52,7 @@ jobs:
           print(f"Zadan: {len(include)}")
           if len(include) > 256:
               sys.exit(f"Za duzo zadan ({len(include)}): GitHub dopuszcza max 256 w jednym uruchomieniu. "
-                       f"Zmniejsz liczbe przebiegow albo zwieksz chunk_size (np. 12 daje 5 zadan na przebieg, czyli do 51 przebiegow).")
+                       f"Zmniejsz liczbe przebiegow albo zwieksz chunk_size (np. 26 daje 2 zadania na przebieg, czyli do 128 przebiegow).")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write("matrix=" + json.dumps({"include": include}) + "\n")
           EOF
@@ -85,7 +85,14 @@ jobs:
         run: pip install eccodes requests
 
       - name: Wyciagnij dane IFS ENS dla stacji
-        run: python hindcast_ifs.py extract "$HC_RUN" "$HC_FROM" "$HC_TO" hindcast_chunks
+        # serwer ECMWF potrafi dlawic (503) przez kilka minut — do 3 prob calego kawalka z przerwa 3 min
+        run: |
+          for i in 1 2 3; do
+            python hindcast_ifs.py extract "$HC_RUN" "$HC_FROM" "$HC_TO" hindcast_chunks && exit 0
+            echo "::warning::Proba $i z 3 nieudana (zwykle 503 z serwera ECMWF)"
+            [ "$i" -lt 3 ] && sleep 180
+          done
+          exit 1
 
       - name: Zachowaj wynik kawalka
         if: always()
