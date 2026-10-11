@@ -250,7 +250,7 @@ def merge(chunks_dir, out_dir):
         merged["missing"] = miss
         with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as f:
             json.dump(merged, f, ensure_ascii=False, separators=(",", ":"))
-        print(f"{run}: członków {len(members)}/30 -> {path} ({os.path.getsize(path) / 1024:.0f} KB)")
+        print(f"{run}: członków {len(members)} -> {path} ({os.path.getsize(path) / 1024:.0f} KB)")
 
 
 def main():
