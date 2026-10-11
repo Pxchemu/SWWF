@@ -11,11 +11,11 @@ on:
         description: 'TEST: tylko 2 kroki i 3 czlonkow, nic nie trafia do repo; drukuje oszacowanie rozmiaru i czasu pelnego przebiegu'
         type: boolean
         default: true
-  schedule:
-    # dwa razy dziennie, ok. 8,5-9 h po przebiegach 00/12Z (otwarte dane ENS pojawiaja sie ~7-8 h po czasie
-    # nominalnym), kazde okno z zapasowym podejsciem godzine pozniej (harmonogram Actions bywa pomijany).
-    # Skrypt pomija przebieg, ktory jest juz zapisany, wiec dodatkowe uruchomienia nic nie dubluja.
-    - cron: '47 8,9,20,21 * * *'
+  # HARMONOGRAM WSTRZYMANY (2026-10-11): replika AWS trzyma historie IFS ENS od 2024-03 (sonda), wiec archiwizowanie
+  # na biezaco jest zbedne - dowolny okres mozna pobrac pozniej hindcastem (hindcast-ifs.yml). Przywroc ponizsze
+  # linie, jesli sonda na koniec sezonu pokaze, ze AWS usuwa starsze przebiegi.
+  # schedule:
+  #   - cron: '47 8,9,20,21 * * *'
 
 permissions:
   contents: write
