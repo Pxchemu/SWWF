@@ -42,8 +42,11 @@ jobs:
                   sys.exit(f"Zly przebieg: {r!r} (oczekiwane 'RRRR-MM-DD GG', GG = 00 lub 12)")
               if r < "2024-03-01":
                   sys.exit(f"{r}: IFS ENS 0.25 na AWS jest dostepny dopiero od 2024-03")
-              for a in range(0, 51, chunk):
-                  b = min(a + chunk - 1, 50)
+          # kolejnosc: kawalek po kawalku przez WSZYSTKIE przebiegi, wiec rownolegle zadania trafiaja w rozne
+          # katalogi dat na serwerze ECMWF (jeden katalog = jeden prefiks S3, ktory dlawi przy duzym ruchu)
+          for a in range(0, 51, chunk):
+              b = min(a + chunk - 1, 50)
+              for r in runs:
                   include.append({"run": r, "m_from": a, "m_to": b,
                                   "tag": f"{r.replace(' ', '_')}_m{a}-{b}"})
           print(f"Zadan: {len(include)}")
@@ -68,6 +71,7 @@ jobs:
       HC_TO: ${{ matrix.m_to }}
       IFS_EXTRAS: ${{ inputs.extras && '1' || '0' }}
       IFS_WORKERS: '4'
+      ECMWF_BACKOFF: '1.5'   # krotsza pierwsza przerwa po 503 (domyslnie 5 s): przy ~40% odrzucen 5 s czekania to wiekszosc czasu zadania
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
