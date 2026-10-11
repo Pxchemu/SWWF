@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: 'Opcjonalnie jedna data RRRR-MM-DD (puste = 1. i 15. dzien kazdego miesiaca od 2024-01)'
+        description: 'Opcjonalnie daty RRRR-MM-DD po przecinku, np. 2024-12-13,2025-06-01 (puste = 1. i 15. dzien kazdego miesiaca od 2024-01)'
         required: false
         default: ''
 
