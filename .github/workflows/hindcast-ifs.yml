@@ -7,9 +7,9 @@ on:
         description: 'Przebiegi IFS ENS po przecinku, "RRRR-MM-DD GG" (UTC; GG = 00 lub 12; od 2024-03; pelny zestaw zmiennych od 2024-11-15), np. 2025-01-15 00,2025-01-16 00'
         required: true
       chunk_size:
-        description: 'Ilu czlonkow na jedno zadanie (51 czlonkow: 0 = kontrolny, 1-50; mniejszy = wiecej zadan naraz = szybciej)'
+        description: 'Ilu czlonkow na jedno zadanie (51 czlonkow: 0 = kontrolny, 1-50; 12 = 5 zadan na przebieg; GitHub dopuszcza max 256 zadan w jednym uruchomieniu, wiec przy 40 przebiegach uzyj 12 lub wiecej)'
         required: true
-        default: '6'
+        default: '12'
       extras:
         description: 'Pobierac tez 2d, 10u, 10v, mn2t3, mx2t3, 10fg, mucape, ptype (kilka razy wiecej danych; domyslnie tylko 2t i tp)'
         type: boolean
@@ -47,6 +47,9 @@ jobs:
                   include.append({"run": r, "m_from": a, "m_to": b,
                                   "tag": f"{r.replace(' ', '_')}_m{a}-{b}"})
           print(f"Zadan: {len(include)}")
+          if len(include) > 256:
+              sys.exit(f"Za duzo zadan ({len(include)}): GitHub dopuszcza max 256 w jednym uruchomieniu. "
+                       f"Zmniejsz liczbe przebiegow albo zwieksz chunk_size (np. 12 daje 5 zadan na przebieg, czyli do 51 przebiegow).")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write("matrix=" + json.dumps({"include": include}) + "\n")
           EOF
@@ -57,13 +60,14 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false      # blad jednego kawalka nie zabija reszty
-      max-parallel: 16
+      max-parallel: 6       # ECMWF S3 dlawi (503 SlowDown) przy zbyt wielu rownoleglych zapytaniach
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       HC_RUN: ${{ matrix.run }}
       HC_FROM: ${{ matrix.m_from }}
       HC_TO: ${{ matrix.m_to }}
       IFS_EXTRAS: ${{ inputs.extras && '1' || '0' }}
+      IFS_WORKERS: '4'
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
