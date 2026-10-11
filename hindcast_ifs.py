@@ -6,6 +6,7 @@ mógł porównać oba modele na tych samych dniach i tych samych obserwacjach.
 mucape, ptype dopiero od ok. 2024-11-15 — wcześniej te pola są po prostu puste). Tylko przebiegi 00 i 12Z.
 
 Pobieramy wyłącznie potrzebne wiadomości GRIB zapytaniami HTTP Range (indeks `.index`), jak w archive_ecmwf_ens.py.
+Domyślnie tylko 2t i tp (minimum do porównania z GEFS); IFS_EXTRAS=1 dokłada 2d, 10u, 10v, mn2t3, mx2t3, 10fg, mucape, ptype.
 
 Użycie (zwykle przez workflow hindcast-ifs.yml):
     python hindcast_ifs.py extract "2025-01-15 00" 0 16 hindcast_chunks     # przebieg, członkowie od-do (0 = kontrolny)
@@ -28,6 +29,7 @@ import json
 import math
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -38,10 +40,12 @@ import archive_ecmwf_ens as A                      # http_get, file_url, index_u
 import hindcast_points as H                        # FIELDS, WINDOWS, load_stations
 
 STEPS = list(range(0, 79, 3))                      # 27 kroków: 0..78 h co 3 h
-BASE_PARAMS = ("2t", "2d", "tp", "10u", "10v")
-EXTRA_PARAMS = ("mn2t3", "mx2t3", "10fg", "mucape", "ptype")
+# Pliki ECMWF są GLOBALNE (pole 0,25° na cały świat, ok. 0,7-1,4 MB na wiadomość) i nie da się pobrać samego fragmentu
+# Europy — dlatego liczba parametrów decyduje o czasie. Minimum do porównania z GEFS to 2t i tp.
+BASE_PARAMS = ("2t", "tp")
+EXTRA_PARAMS = ("2d", "10u", "10v", "mn2t3", "mx2t3", "10fg", "mucape", "ptype")
 ESSENTIAL = ("apcp", "t_end")
-WORKERS = int(os.environ.get("IFS_WORKERS", "10"))
+WORKERS = int(os.environ.get("IFS_WORKERS", "8"))
 
 FIELDS = dict(H.FIELDS)
 FIELDS.update({
@@ -118,7 +122,7 @@ def r3(v):
     return None if v is None or v != v else round(v, 3)
 
 
-def extract(run, m_from, m_to, outdir, extras=True):
+def extract(run, m_from, m_to, outdir, extras=False):
     stations = H.load_stations()
     points = [(s["code"], s["name"], s["lat"], s["lon"]) for s in stations]
     params = set(BASE_PARAMS) | (set(EXTRA_PARAMS) if extras else set())
@@ -128,6 +132,7 @@ def extract(run, m_from, m_to, outdir, extras=True):
     print(f"IFS ENS {run:%Y-%m-%d %H}Z, źródło: {base.split('/')[2]}, stacji: {len(stations)}, "
           f"członkowie {m_from}-{m_to}, parametry: {sorted(params)}", flush=True)
 
+    t0 = time.time()
     jobs, present = [], set()
     for step in STEPS:
         idx = read_index(base, run, step, params)
@@ -155,8 +160,8 @@ def extract(run, m_from, m_to, outdir, extras=True):
                 if grid_info is None:
                     grid_info = [(x[1], x[2], x[3]) for x in res]
             done += 1
-            if done % 1000 == 0:
-                print(f"  pobrano {done}/{len(jobs)}", flush=True)
+            if done % 500 == 0:
+                print(f"  pobrano {done}/{len(jobs)}  ({A.STATS['bytes'] / 1e6:.0f} MB, {time.time() - t0:.0f} s)", flush=True)
     if fails:
         print(f"Niepowodzenia pobierania: {len(fails)} (pierwsze 5):")
         for k, why in list(fails.items())[:5]:
@@ -215,6 +220,7 @@ def extract(run, m_from, m_to, outdir, extras=True):
     with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as f:
         json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
     print(f"Zapisano: {path} (członków: {len(members_out)}, puste pola: {missing})", flush=True)
+    print(f"Czas: {time.time() - t0:.0f} s, pobrano {A.STATS['bytes'] / 1e6:.0f} MB w {A.STATS['requests']} zapytaniach", flush=True)
 
 
 def main():
@@ -222,7 +228,7 @@ def main():
         sys.exit(__doc__)
     run = parse_run(sys.argv[2])
     outdir = sys.argv[5] if len(sys.argv) > 5 else os.path.join(HERE, "hindcast_chunks")
-    extras = os.environ.get("IFS_EXTRAS", "1").strip() not in ("0", "false", "")
+    extras = os.environ.get("IFS_EXTRAS", "0").strip() not in ("0", "false", "")
     extract(run, int(sys.argv[3]), int(sys.argv[4]), outdir, extras)
 
 
