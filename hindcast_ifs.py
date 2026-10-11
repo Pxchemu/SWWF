@@ -45,7 +45,8 @@ STEPS = list(range(0, 79, 3))                      # 27 kroków: 0..78 h co 3 h
 BASE_PARAMS = ("2t", "tp")
 EXTRA_PARAMS = ("2d", "10u", "10v", "mn2t3", "mx2t3", "10fg", "mucape", "ptype")
 ESSENTIAL = ("apcp", "t_end")
-WORKERS = int(os.environ.get("IFS_WORKERS", "8"))
+WORKERS = int(os.environ.get("IFS_WORKERS", "4"))   # S3 ECMWF dławi (503 SlowDown) przy zbyt wielu równoległych zapytaniach
+RETRY_ROUNDS = 4                                       # ile razy ponawiamy nieudane wiadomości po głównym przebiegu
 
 FIELDS = dict(H.FIELDS)
 FIELDS.update({
@@ -68,7 +69,7 @@ def parse_run(text):
 def pick_base(run):
     """Pierwsze źródło mające przebieg (AWS ma historię, portal tylko ostatnie doby)."""
     for base in A.BASES:
-        st, raw = A.http_get(A.index_url(base, run, STEPS[-1]), attempts=3, timeout=60)
+        st, raw = A.http_get(A.index_url(base, run, STEPS[-1]), attempts=8, timeout=60)
         if raw is not None:
             return base
     return None
@@ -76,7 +77,7 @@ def pick_base(run):
 
 def read_index(base, run, step, params):
     """[(param, członek, offset, długość)] dla kroku; członek 0 = kontrolny (type cf)."""
-    st, raw = A.http_get(A.index_url(base, run, step))
+    st, raw = A.http_get(A.index_url(base, run, step), attempts=10)
     if raw is None:
         return None
     out = []
@@ -99,7 +100,7 @@ def read_index(base, run, step, params):
 
 def fetch(base, run, step, offset, length, points):
     try:
-        st, raw = A.http_get(A.file_url(base, run, step), headers={"Range": f"bytes={offset}-{offset + length - 1}"})
+        st, raw = A.http_get(A.file_url(base, run, step), headers={"Range": f"bytes={offset}-{offset + length - 1}"}, attempts=10)
     except Exception as e:
         return None, f"siec: {str(e)[-100:]}"
     if raw is None or len(raw) != length:
@@ -148,24 +149,44 @@ def extract(run, m_from, m_to, outdir, extras=False):
             sys.exit(f"W indeksie brak wymaganego parametru {need}.")
 
     vals, fails, grid_info, done = {}, {}, None, 0
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(fetch, base, run, s, o, l, points): (s, p, m) for s, p, m, o, l in jobs}
-        for fut in as_completed(futs):
-            key = futs[fut]
-            res, why = fut.result()
-            if res is None:
-                fails[key] = why
-            else:
-                vals[key] = [x[0] for x in res]
-                if grid_info is None:
-                    grid_info = [(x[1], x[2], x[3]) for x in res]
-            done += 1
-            if done % 500 == 0:
-                print(f"  pobrano {done}/{len(jobs)}  ({A.STATS['bytes'] / 1e6:.0f} MB, {time.time() - t0:.0f} s)", flush=True)
+
+    def run_pass(todo, workers, label):
+        """Pobiera listę wiadomości; zwraca słownik nieudanych {klucz: powód}."""
+        nonlocal grid_info, done
+        bad, n = {}, 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(fetch, base, run, s, o, l, points): (s, p, m, o, l) for s, p, m, o, l in todo}
+            for fut in as_completed(futs):
+                s_, p_, m_, o_, l_ = futs[fut]
+                res, why = fut.result()
+                if res is None:
+                    bad[(s_, p_, m_, o_, l_)] = why
+                else:
+                    vals[(s_, p_, m_)] = [x[0] for x in res]
+                    if grid_info is None:
+                        grid_info = [(x[1], x[2], x[3]) for x in res]
+                n += 1
+                done += 1
+                if done % 500 == 0:
+                    print(f"  {label}: {n}/{len(todo)}  ({A.STATS['bytes'] / 1e6:.0f} MB, {time.time() - t0:.0f} s)", flush=True)
+        return bad
+
+    pending = run_pass(jobs, WORKERS, "pobrano")
+    for rnd in range(1, RETRY_ROUNDS + 1):
+        if not pending:
+            break
+        print(f"Nieudane wiadomości: {len(pending)} (np. {next(iter(pending.values()))}); runda ponowień {rnd}/{RETRY_ROUNDS} "
+              f"za {30 * rnd} s, wątków: {max(1, WORKERS // 2)}", flush=True)
+        time.sleep(30 * rnd)
+        pending = run_pass(list(pending), max(1, WORKERS // 2), f"ponowienie {rnd}")
+    fails = pending
     if fails:
-        print(f"Niepowodzenia pobierania: {len(fails)} (pierwsze 5):")
+        print(f"Niepowodzenia pobierania po {RETRY_ROUNDS} rundach ponowień: {len(fails)} (pierwsze 5):")
         for k, why in list(fails.items())[:5]:
             print(f"  krok {k[0]} h, {k[1]}, członek {k[2]}: {why}")
+        # lepiej nie zapisać nic niż zapisać dziurawy kawałek (brakujących członków nikt by nie zauważył);
+        # ponów to zadanie przyciskiem "Re-run failed jobs" — scalanie dopisze brakujące
+        sys.exit("Kawałek niekompletny — nie zapisuję pliku. Uruchom ponownie nieudane zadania.")
     if grid_info is None:
         sys.exit("Brak jakichkolwiek danych.")
 
