@@ -40,6 +40,8 @@ import archive_ecmwf_ens as A                      # http_get, file_url, index_u
 import hindcast_points as H                        # FIELDS, WINDOWS, load_stations
 
 STEPS = list(range(0, 79, 3))                      # 27 kroków: 0..78 h co 3 h
+STEPS_3H = set(range(3, 79, 3))                     # końce i połowy okien 6 h
+STEPS_6H = set(range(6, 79, 6))                     # tylko końce okien
 # Pliki ECMWF są GLOBALNE (pole 0,25° na cały świat, ok. 0,7-1,4 MB na wiadomość) i nie da się pobrać samego fragmentu
 # Europy — dlatego liczba parametrów decyduje o czasie. Minimum do porównania z GEFS to 2t i tp.
 BASE_PARAMS = ("2t", "tp")
@@ -111,6 +113,14 @@ def fetch(base, run, step, offset, length, points):
         return None, f"GRIB: {type(e).__name__}: {str(e)[:80]}"
 
 
+def needed_steps(param):
+    """Które kroki są naprawdę używane: tp tylko na granicach okien 6 h (6, 12, ... 78 h; reszta to ~30% zbędnych
+    pobrań), cape (mucape) tylko na końcach okien, pozostałe pola także w połowie okna (3, 6, 9, ... 78 h)."""
+    if param in ("tp", "mucape"):
+        return STEPS_6H
+    return STEPS_3H
+
+
 def rh_from(t_k, td_k):
     if t_k is None or td_k is None:
         return None
@@ -135,13 +145,15 @@ def extract(run, m_from, m_to, outdir, extras=False):
 
     t0 = time.time()
     jobs, present = [], set()
-    for step in STEPS:
-        idx = read_index(base, run, step, params)
+    steps = [st for st in STEPS if st > 0]                 # krok 0 nie jest używany (opad okna 0-6 h = tp(6 h) - 0)
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:     # indeksy (po kilka MB każdy) równolegle, nie po kolei
+        indexes = list(ex.map(lambda st: read_index(base, run, st, params), steps))
+    for step, idx in zip(steps, indexes):
         if idx is None:
             sys.exit(f"Brak indeksu kroku {step} h — przebieg niekompletny.")
         for param, member, off, ln in idx:
             present.add(param)
-            if m_from <= member <= m_to:
+            if m_from <= member <= m_to and step in needed_steps(param):
                 jobs.append((step, param, member, off, ln))
     print(f"Wiadomości do pobrania: {len(jobs)}; dostępne parametry: {sorted(present)}", flush=True)
     for need in ("2t", "tp"):
@@ -241,7 +253,7 @@ def extract(run, m_from, m_to, outdir, extras=False):
     with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as f:
         json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
     print(f"Zapisano: {path} (członków: {len(members_out)}, puste pola: {missing})", flush=True)
-    print(f"Czas: {time.time() - t0:.0f} s, pobrano {A.STATS['bytes'] / 1e6:.0f} MB w {A.STATS['requests']} zapytaniach", flush=True)
+    print(f"Czas: {time.time() - t0:.0f} s, pobrano {A.STATS['bytes'] / 1e6:.0f} MB w {A.STATS['requests']} zapytaniach, w tym nieudanych (ponowionych): {A.STATS['retries']}", flush=True)
 
 
 def main():
