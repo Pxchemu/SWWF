@@ -23,6 +23,8 @@ Wynik: ecmwf_archive/{RRRR-MM-DD}_{GG}z.json.gz — jedna paczka na przebieg:
      "missing": [...]}
 Zmienne: t_2m (K, scale 100), tot_prec (mm = kg/m2, SUMA OD STARTU, scale 100), snow (mm w.e., SUMA OD STARTU,
 scale 100). Dobowy opad = różnica między krokami.
+Od 2026-10-11 także: tmin_2m_3h / tmax_2m_3h (K, min/max z 3 h przed krokiem), gust_10m (m/s, max z 3 h),
+mucape (J/kg), u_10m / v_10m (m/s), snow_depth (mm w.e.), ptype (kod). Starsze paczki mają tylko pierwsze trzy.
 
 Wymaga: pip install eccodes requests
 """
@@ -47,7 +49,18 @@ PARAMS = {
     "2t": ("t_2m", 1.0, 100),          # K
     "tp": ("tot_prec", 1000.0, 100),   # m -> mm
     "sf": ("snow", 1000.0, 100),       # m w.e. -> mm
+    # dodane 2026-10-11 (po przejrzeniu indeksu ECMWF):
+    "mn2t3": ("tmin_2m_3h", 1.0, 100),   # K, minimum T2m z ostatnich 3 h (do TMIN; samo 2t co 3 h go nie lapie)
+    "mx2t3": ("tmax_2m_3h", 1.0, 100),   # K, maksimum T2m z ostatnich 3 h
+    "10fg": ("gust_10m", 1.0, 100),      # m/s, maks. porywy wiatru w oknie 3 h
+    "mucape": ("mucape", 1.0, 1),        # J/kg, CAPE (burze, szkwaly sniezne)
+    "10u": ("u_10m", 1.0, 100),          # m/s, skladowa wschodnia wiatru sredniego
+    "10v": ("v_10m", 1.0, 100),          # m/s, skladowa polnocna
+    "sd": ("snow_depth", 1000.0, 100),   # m w.e. -> mm w.e., pokrywa sniegu (do porownania z PKSN)
+    "ptype": ("ptype", 1.0, 1),          # kod typu opadu ECMWF (0 brak, 1 deszcz, 3 marznacy deszcz, 5 snieg, 6 mokry snieg, 7 deszcz ze sniegiem, 8 granulki lodu) - wlasna klasyfikacja fazy modelu
 }
+# pola okien/sum, ktorych nie ma w kroku 0
+NO_STEP0 = ("tp", "sf", "mn2t3", "mx2t3", "10fg")
 ESSENTIAL = ("2t", "tp")
 TEST = os.environ.get("ECMWF_TEST", "").strip() not in ("", "0")
 STEPS = [0, 6] if TEST else list(range(0, 73, 3))
@@ -94,8 +107,10 @@ def index_url(base, run, step):
     return file_url(base, run, step).rsplit(".grib2", 1)[0] + ".index"
 
 
-def http_get(url, headers=None, attempts=4, timeout=120):
-    """Zwraca (status, bytes). 404/403 -> (status, None) bez ponawiania; inne błędy ponawia."""
+def http_get(url, headers=None, attempts=7, timeout=120):
+    """Zwraca (status, bytes). 404/403 -> (status, None) bez ponawiania; inne błędy ponawia.
+    S3 ECMWF bywa chwilowo przeciążony (503 SlowDown / 429) — wtedy czekamy coraz dłużej
+    (5, 10, 20, 40, 60, 60 s), zamiast poddawać się po kilkunastu sekundach."""
     last = None
     for i in range(attempts):
         try:
@@ -108,7 +123,8 @@ def http_get(url, headers=None, attempts=4, timeout=120):
             return r.status_code, r.content
         except Exception as e:
             last = e
-            time.sleep(2 * (i + 1))
+            if i < attempts - 1:
+                time.sleep(min(60, 5 * 2 ** i))
     raise RuntimeError(f"{url}: {last}")
 
 
@@ -266,12 +282,12 @@ def main():
     missing = []
     for step in STEPS:
         for param in PARAMS:
-            if step == 0 and param in ("tp", "sf"):
-                continue                # pola sum nie istnieją w kroku 0
+            if step == 0 and param in NO_STEP0:
+                continue                # pola sum/okien nie istnieją w kroku 0
             for m in members:
                 if (step, param, m) not in results:
                     missing.append(f"{param}@{step}#{m}")
-    total = sum(1 for s in STEPS for p in PARAMS for _ in members if not (s == 0 and p in ("tp", "sf")))
+    total = sum(1 for s in STEPS for p in PARAMS for _ in members if not (s == 0 and p in NO_STEP0))
     if failures:
         print(f"Niepowodzenia pobierania: {len(failures)} (pierwsze 8):")
         for key, why in list(failures.items())[:8]:
@@ -309,7 +325,10 @@ def main():
         "archived_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "steps": STEPS,
         "members": members,
-        "units": {"t_2m": "K", "tot_prec": "mm (suma od startu)", "snow": "mm w.e. (suma od startu)"},
+        "units": {"t_2m": "K", "tot_prec": "mm (suma od startu)", "snow": "mm w.e. (suma od startu)",
+                  "tmin_2m_3h": "K (min z 3 h)", "tmax_2m_3h": "K (max z 3 h)", "gust_10m": "m/s (max z 3 h)",
+                  "mucape": "J/kg", "u_10m": "m/s", "v_10m": "m/s", "snow_depth": "mm w.e.",
+                  "ptype": "kod typu opadu ECMWF"},
         "scale": {name: scale for name, _mult, scale in PARAMS.values()},
         "points": [{"id": p[0], "name": p[1], "lat": p[2], "lon": p[3],
                     "grid_lat": round(g[0], 4), "grid_lon": round(g[1], 4), "dist_km": round(g[2], 2)}
