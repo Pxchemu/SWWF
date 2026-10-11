@@ -77,7 +77,8 @@ except Exception:
     POINTS = [("WARSZAWA", "Warszawa-Okęcie", 52.17, 20.97), ("KRAKOW", "Kraków-Balice", 50.08, 19.80),
               ("GDANSK", "Gdańsk-Rębiechowo", 54.38, 18.47), ("WROCLAW", "Wrocław-Strachowice", 51.10, 16.89)]
 
-STATS = {"bytes": 0, "requests": 0}
+STATS = {"bytes": 0, "requests": 0, "retries": 0}
+BACKOFF_BASE = float(os.environ.get("ECMWF_BACKOFF", "5"))   # s; pierwsza przerwa po bledzie, potem x2 (max 60 s)
 
 
 def parse_run(argv):
@@ -124,8 +125,9 @@ def http_get(url, headers=None, attempts=7, timeout=120):
             return r.status_code, r.content
         except Exception as e:
             last = e
+            STATS["retries"] += 1
             if i < attempts - 1:
-                time.sleep(min(60, 5 * 2 ** i) * random.uniform(0.6, 1.4))   # jitter: watki nie ponawiaja jednoczesnie
+                time.sleep(min(60, BACKOFF_BASE * 2 ** i) * random.uniform(0.6, 1.4))   # jitter: watki nie ponawiaja jednoczesnie
     raise RuntimeError(f"{url}: {last}")
 
 
