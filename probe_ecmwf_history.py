@@ -14,7 +14,11 @@ from datetime import date, datetime, timedelta
 
 import requests
 
-BASES = ["https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com", "https://data.ecmwf.int/forecasts"]
+BASES = ["https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com", "https://storage.googleapis.com/ecmwf-open-data", "https://data.ecmwf.int/forecasts"]
+
+
+def label(base):
+    return "aws-s3" if "s3" in base else ("google" if "googleapis" in base else "ecmwf.int")
 WANT = ["2t", "tp", "sf", "mn2t3", "mx2t3", "10fg", "mucape", "ptype", "sd", "10u", "10v", "msl", "tcwv"]
 HEADERS = {"User-Agent": "SWWF-probe/1.0 (research; GitHub Actions)"}
 
@@ -39,7 +43,7 @@ def get(u, attempts=4):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1].strip():
-        days = [datetime.strptime(sys.argv[1].strip(), "%Y-%m-%d").date()]
+        days = [datetime.strptime(x.strip(), "%Y-%m-%d").date() for x in sys.argv[1].split(",") if x.strip()]
     else:
         days, d = [], date(2024, 1, 1)
         today = date.today()
@@ -68,10 +72,10 @@ def main():
                             params.add(j.get("param"))
                             members.add((j.get("type"), j.get("number")))
                     miss = [w for w in WANT if w not in params]
-                    print(f"{d}  {hh:02d}Z      {('aws-s3' if 's3' in base else 'ecmwf.int'):<11}{st!s:<8} brak: {miss or '-'} | czlonkow: {len(members)}", flush=True)
+                    print(f"{d}  {hh:02d}Z      {label(base):<11}{st!s:<8} brak: {miss or '-'} | czlonkow: {len(members)}", flush=True)
                     first_ok = first_ok or (d, hh)
-                    break
-                line = f"{d}  {hh:02d}Z      {('aws-s3' if 's3' in base else 'ecmwf.int'):<11}{st!s:<8}"
+                    continue
+                line = f"{d}  {hh:02d}Z      {label(base):<11}{st!s:<8}"
                 print(line, flush=True)
             if not found:
                 pass
