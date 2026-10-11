@@ -41,6 +41,7 @@ GUST_BLIZZARD_MS = 15.5
 COLD_AIR_BIAS_PROD = -1.0          # korekta produkcyjna z generate_swwf.py (COLD_AIR_BIAS_C)
 VIS_BLIZZARD_M = 400.0
 OUT = []
+SKIP = set()          # sekcje pomijane przez --skip (ice, blizzard)
 
 
 def say(text=""):
@@ -74,16 +75,39 @@ def load_obs(path):
     return obs
 
 
-def load_runs(directory):
+def load_runs(directory, min_members=30):
     runs = {}
     for p in sorted(glob.glob(os.path.join(directory, "*.json.gz"))):
         d = json.load(gzip.open(p, "rt", encoding="utf-8"))
         stamp = datetime.strptime(d["run"], "%Y-%m-%dT%H:00Z")
-        if stamp.hour != 0 or len(d["members"]) != 30:
+        if stamp.hour != 0 or len(d["members"]) < min_members:
             continue
         arr = {k: np.array(v, dtype=float) for k, v in d["data"].items()}     # [członek, stacja, okno]; None -> nan
         runs[stamp.date()] = dict(arr=arr, stations=d["stations"], nwin=len(d["windows"]))
     return runs
+
+
+def pool_runs(runs_a, runs_b, wa, wb):
+    """Łączy członków dwóch modeli w jeden zespół (tylko przebiegi wspólne, stacje wspólne po kodzie).
+    wa / wb = ile razy powtórzyć członków modelu A / B: 5:3 przy 30 i 51 członkach daje ~równą wagę modeli
+    (150 vs 153 członków), 1:1 = zwykłe złączenie (IFS ~63% wagi). Pola, których model nie ma, są NaN w jego części."""
+    out = {}
+    for d in sorted(set(runs_a) & set(runs_b)):
+        A_, B_ = runs_a[d], runs_b[d]
+        codes_b = {st["code"]: i for i, st in enumerate(B_["stations"])}
+        keep = [(i, codes_b[st["code"]]) for i, st in enumerate(A_["stations"]) if st["code"] in codes_b]
+        if not keep or A_["nwin"] != B_["nwin"]:
+            continue
+        ia = [i for i, _ in keep]; ib = [j for _, j in keep]
+        arr = {}
+        for k in sorted(set(A_["arr"]) | set(B_["arr"])):
+            ma = A_["arr"][k].shape[0] if k in A_["arr"] else next(iter(A_["arr"].values())).shape[0]
+            mb = B_["arr"][k].shape[0] if k in B_["arr"] else next(iter(B_["arr"].values())).shape[0]
+            pa = A_["arr"][k][:, ia, :].astype(np.float32) if k in A_["arr"] else np.full((ma, len(ia), A_["nwin"]), np.nan, np.float32)
+            pb = B_["arr"][k][:, ib, :].astype(np.float32) if k in B_["arr"] else np.full((mb, len(ib), B_["nwin"]), np.nan, np.float32)
+            arr[k] = np.concatenate([np.tile(pa, (wa, 1, 1)), np.tile(pb, (wb, 1, 1))], axis=0)
+        out[d] = dict(arr=arr, stations=[A_["stations"][i] for i in ia], nwin=A_["nwin"])
+    return out
 
 
 def day_windows(shift_h, k, nwin):
@@ -403,6 +427,8 @@ def section_quiet(runs, obs):
         ("zamieć (porywy >= 15.5 m/s + śnieg, bez VIS)", 6, blizz_extra, lambda s: s.obs("ZMNI") + s.obs("ZMWS"),
          lambda v: v.mean(axis=1), lambda o: o >= 1),
     ]
+    if "blizzard" in SKIP:
+        specs = [sp for sp in specs if not sp[0].startswith("zamieć")]
     for k in (0, 1, 2):
         say(f"### wyprzedzenie k={k}")
         for name, shift, extra, obsfn, pfun, evfun in specs:
@@ -707,7 +733,21 @@ def main():
     ap.add_argument("--hindcast", default="hindcast_v2")
     ap.add_argument("--obs", default=None)
     ap.add_argument("--out", default="reports/calibration_report.md")
+    ap.add_argument("--min-members", type=int, default=30,
+                    help="minimalna liczba członków w przebiegu (GEFS: 30; IFS ENS: 50)")
+    ap.add_argument("--common-with", default=None,
+                    help="katalog drugiego hindcastu: liczy tylko przebiegi (daty), które są w obu — porównanie GEFS vs IFS na tych samych dniach")
+    ap.add_argument("--pool-with", default=None,
+                    help="katalog drugiego hindcastu (np. hindcast_ifs): łączy członków obu modeli w jeden zespół i liczy raport "
+                         "dla zespołu połączonego (tylko przebiegi wspólne)")
+    ap.add_argument("--pool-weights", default="5:3",
+                    help="powtórzenia członków A:B przy łączeniu; 5:3 = ~równa waga modeli przy 30 (GEFS) i 51 (IFS) członkach, 1:1 = zwykłe złączenie")
+    ap.add_argument("--pool-min-members", type=int, default=50, help="minimalna liczba członków drugiego modelu")
+    ap.add_argument("--skip", default="",
+                    help="sekcje do pominięcia, po przecinku: ice, blizzard (np. dla IFS, który nie ma CFRZR/VIS)")
     a = ap.parse_args()
+    skip = {x.strip() for x in a.skip.split(",") if x.strip()}
+    SKIP.update(skip)
     here = os.path.dirname(os.path.abspath(__file__))
     hd = a.hindcast if os.path.isabs(a.hindcast) else os.path.join(here, a.hindcast)
     obs_path = a.obs
@@ -718,12 +758,32 @@ def main():
         obs_path = found[-1]
     elif not os.path.isabs(obs_path):
         obs_path = os.path.join(here, obs_path)
-    runs = load_runs(hd)
+    runs = load_runs(hd, a.min_members)
     if not runs:
-        sys.exit(f"Brak pełnych przebiegów 00Z w {hd}")
+        sys.exit(f"Brak pełnych przebiegów 00Z (>= {a.min_members} członków) w {hd}")
+    if a.common_with:
+        other_dir = a.common_with if os.path.isabs(a.common_with) else os.path.join(here, a.common_with)
+        other = load_runs(other_dir, 1)
+        runs = {k: v for k, v in runs.items() if k in other}
+        if not runs:
+            sys.exit(f"Brak wspólnych przebiegów z {other_dir}")
+    pool_info = None
+    if a.pool_with:
+        pdir = a.pool_with if os.path.isabs(a.pool_with) else os.path.join(here, a.pool_with)
+        runs_b = load_runs(pdir, a.pool_min_members)
+        wa, wb = (int(x) for x in a.pool_weights.split(":"))
+        runs = pool_runs(runs, runs_b, wa, wb)
+        if not runs:
+            sys.exit(f"Brak wspólnych kompletnych przebiegów z {pdir}")
+        n_any = next(iter(runs.values()))["arr"]["apcp"].shape[0]
+        pool_info = f"zespół POŁĄCZONY: {os.path.basename(hd)} x{wa} + {os.path.basename(pdir)} x{wb} = {n_any} członków (waga modeli ~ {wa}*A : {wb}*B)"
+    n_members = sorted({len(json.load(gzip.open(p, "rt", encoding="utf-8"))["members"])
+                        for p in sorted(glob.glob(os.path.join(hd, "*.json.gz")))[:3]})
     obs = load_obs(obs_path)
     say(f"# Kalibracja SWWF na obserwacjach IMGW — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    say(f"hindcast: {hd} ({len(runs)} przebiegów 00Z z 30 członkami, okien na przebieg: {sorted({r['nwin'] for r in runs.values()})}); obs: {os.path.basename(obs_path)} ({len(obs)} stacjodni)")
+    say(f"hindcast: {hd} ({len(runs)} przebiegów 00Z z {'/'.join(map(str, n_members))} członkami, okien na przebieg: {sorted({r['nwin'] for r in runs.values()})}); obs: {os.path.basename(obs_path)} ({len(obs)} stacjodni)")
+    if pool_info:
+        say(pool_info)
     say("Próba jest dobrana pod zdarzenia i dni spokojne (nie klimatologiczna) — FAR i odsetki zdarzeń z sekcji 1-5 dotyczą próby mieszanej; "
         "sekcja 6 rozdziela doby bez zdarzenia i ze zdarzeniem.")
     say()
@@ -731,8 +791,10 @@ def main():
     section_precip(runs, obs)
     section_snow(runs, obs)
     section_cold(runs, obs)
-    section_ice(runs, obs)
-    section_blizzard(runs, obs)
+    if "ice" not in skip:
+        section_ice(runs, obs)
+    if "blizzard" not in skip:
+        section_blizzard(runs, obs)
     section_quiet(runs, obs)
     section_cold_bias(runs, obs)
     section_snow_cal(runs, obs)
