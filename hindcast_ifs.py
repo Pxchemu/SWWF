@@ -71,7 +71,7 @@ def parse_run(text):
 def pick_base(run):
     """Pierwsze źródło mające przebieg (AWS ma historię, portal tylko ostatnie doby)."""
     for base in A.BASES:
-        st, raw = A.http_get(A.index_url(base, run, STEPS[-1]), attempts=8, timeout=60)
+        st, raw = A.http_get(A.index_url(base, run, STEPS[-1]), attempts=12, timeout=60)
         if raw is not None:
             return base
     return None
@@ -79,7 +79,7 @@ def pick_base(run):
 
 def read_index(base, run, step, params):
     """[(param, członek, offset, długość)] dla kroku; członek 0 = kontrolny (type cf)."""
-    st, raw = A.http_get(A.index_url(base, run, step), attempts=10)
+    st, raw = A.http_get(A.index_url(base, run, step), attempts=14)
     if raw is None:
         return None
     out = []
@@ -107,6 +107,8 @@ def fetch(base, run, step, offset, length, points):
         return None, f"siec: {str(e)[-100:]}"
     if raw is None or len(raw) != length:
         return None, f"HTTP {st} / dlugosc"
+    if raw[:4] != b"GRIB" or raw[-4:] != b"7777":          # zle przesuniecie (np. inny plik na lustrze) - odrzuc
+        return None, "GRIB: zly poczatek/koniec wiadomosci"
     try:
         return A.read_points(raw, points), None
     except Exception as e:
@@ -253,7 +255,7 @@ def extract(run, m_from, m_to, outdir, extras=False):
     with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as f:
         json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
     print(f"Zapisano: {path} (członków: {len(members_out)}, puste pola: {missing})", flush=True)
-    print(f"Czas: {time.time() - t0:.0f} s, pobrano {A.STATS['bytes'] / 1e6:.0f} MB w {A.STATS['requests']} zapytaniach, w tym nieudanych (ponowionych): {A.STATS['retries']}", flush=True)
+    print(f"Czas: {time.time() - t0:.0f} s, pobrano {A.STATS['bytes'] / 1e6:.0f} MB w {A.STATS['requests']} zapytaniach, w tym nieudanych (ponowionych): {A.STATS['retries']}, z lustra Google: {A.STATS['google_ok']}", flush=True)
 
 
 def main():
