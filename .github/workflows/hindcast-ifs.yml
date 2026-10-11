@@ -7,13 +7,13 @@ on:
         description: 'Przebiegi IFS ENS po przecinku, "RRRR-MM-DD GG" (UTC; GG = 00 lub 12; od 2024-03; pelny zestaw zmiennych od 2024-11-15), np. 2025-01-15 00,2025-01-16 00'
         required: true
       chunk_size:
-        description: 'Ilu czlonkow na jedno zadanie (51 czlonkow: 0 = kontrolny, 1-50; dzielone na kawalki)'
+        description: 'Ilu czlonkow na jedno zadanie (51 czlonkow: 0 = kontrolny, 1-50; mniejszy = wiecej zadan naraz = szybciej)'
         required: true
-        default: '17'
+        default: '6'
       extras:
-        description: 'Pobierac tez mn2t3, mx2t3, 10fg, mucape, ptype (wiecej danych; bez nich szybciej)'
+        description: 'Pobierac tez 2d, 10u, 10v, mn2t3, mx2t3, 10fg, mucape, ptype (kilka razy wiecej danych; domyslnie tylko 2t i tp)'
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write
@@ -57,7 +57,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false      # blad jednego kawalka nie zabija reszty
-      max-parallel: 8
+      max-parallel: 16
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       HC_RUN: ${{ matrix.run }}
