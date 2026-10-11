@@ -1,0 +1,39 @@
+name: SWWF - wybor dni do hindcastu (IFS vs GEFS)
+
+on:
+  workflow_dispatch:   # tylko recznie
+    inputs:
+      max_event:
+        description: 'Maks. dni na typ zdarzenia (snieg / mroz <=-10 / mroz <=-15 / opad >=10 mm)'
+        required: false
+        default: '12'
+      quiet:
+        description: 'Ile dni spokojnych dolozyc'
+        required: false
+        default: '15'
+      per_batch:
+        description: 'Ile przebiegow w jednej paczce (jedno uruchomienie hindcast.yml / hindcast-ifs.yml)'
+        required: false
+        default: '40'
+
+permissions:
+  contents: read
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install numpy
+
+      - name: Wybierz dni i przebiegi (wynik w logu tego kroku)
+        run: python pick_hindcast_days.py --max-event "${{ inputs.max_event }}" --quiet "${{ inputs.quiet }}" --per-batch "${{ inputs.per_batch }}"
