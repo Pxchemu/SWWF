@@ -11,6 +11,30 @@ on:
         description: 'Plik obserwacji w repo (puste = najnowszy obs/imgw_dobowe_*.csv.gz)'
         required: false
         default: ''
+      common_with:
+        description: 'Porownanie modeli: drugi folder hindcastu (np. hindcast_ifs dla hindcast_v2 i odwrotnie); licza sie tylko przebiegi wspolne. Puste = wszystkie'
+        required: false
+        default: ''
+      pool_with:
+        description: 'ZESPOL POLACZONY: drugi folder hindcastu, ktorego czlonkowie dolacza do zespolu (np. hindcast_v2 + pool_with=hindcast_ifs). Puste = bez laczenia'
+        required: false
+        default: ''
+      pool_weights:
+        description: 'Powtorzenia czlonkow A:B przy laczeniu (5:3 = rowna waga modeli przy 30 GEFS i 51 IFS; 1:1 = zwykle zlaczenie)'
+        required: false
+        default: '5:3'
+      min_members:
+        description: 'Minimalna liczba czlonkow w przebiegu (GEFS 30, IFS ENS 50)'
+        required: false
+        default: '30'
+      skip:
+        description: 'Sekcje do pominiecia po przecinku: ice, blizzard (dla IFS: ice,blizzard)'
+        required: false
+        default: ''
+      tag:
+        description: 'Dopisek do nazwy raportu (np. wspolne_z_ifs)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -22,6 +46,12 @@ jobs:
     env:
       HC_DIR: ${{ inputs.hindcast_dir }}
       OBS_FILE: ${{ inputs.obs_file }}
+      COMMON_WITH: ${{ inputs.common_with }}
+      POOL_WITH: ${{ inputs.pool_with }}
+      POOL_WEIGHTS: ${{ inputs.pool_weights }}
+      MIN_MEMBERS: ${{ inputs.min_members }}
+      SKIP_SECTIONS: ${{ inputs.skip }}
+      REPORT_TAG: ${{ inputs.tag }}
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -36,8 +66,12 @@ jobs:
 
       - name: Policz raport
         run: |
-          ARGS=(--hindcast "$HC_DIR" --out "reports/calibration_report_${HC_DIR}.md")
+          NAME="$HC_DIR"; if [ -n "$REPORT_TAG" ]; then NAME="${HC_DIR}_${REPORT_TAG}"; fi
+          ARGS=(--hindcast "$HC_DIR" --out "reports/calibration_report_${NAME}.md" --min-members "${MIN_MEMBERS:-30}")
           if [ -n "$OBS_FILE" ]; then ARGS+=(--obs "$OBS_FILE"); fi
+          if [ -n "$COMMON_WITH" ]; then ARGS+=(--common-with "$COMMON_WITH"); fi
+          if [ -n "$POOL_WITH" ]; then ARGS+=(--pool-with "$POOL_WITH" --pool-weights "${POOL_WEIGHTS:-5:3}"); fi
+          if [ -n "$SKIP_SECTIONS" ]; then ARGS+=(--skip "$SKIP_SECTIONS"); fi
           python calibrate_swwf.py "${ARGS[@]}"
 
       - name: Zapisz raport do repo
