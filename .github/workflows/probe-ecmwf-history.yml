@@ -1,0 +1,31 @@
+name: SWWF - sonda historii ECMWF (jednorazowa)
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Opcjonalnie jedna data RRRR-MM-DD (puste = 1. i 15. dzien kazdego miesiaca od 2024-01)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install requests
+
+      - name: Sprawdz historie ECMWF
+        run: python probe_ecmwf_history.py "${{ inputs.date }}"
