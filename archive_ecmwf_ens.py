@@ -31,6 +31,7 @@ Wymaga: pip install eccodes requests
 import gzip
 import json
 import os
+import random
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -110,7 +111,7 @@ def index_url(base, run, step):
 def http_get(url, headers=None, attempts=7, timeout=120):
     """Zwraca (status, bytes). 404/403 -> (status, None) bez ponawiania; inne błędy ponawia.
     S3 ECMWF bywa chwilowo przeciążony (503 SlowDown / 429) — wtedy czekamy coraz dłużej
-    (5, 10, 20, 40, 60, 60 s), zamiast poddawać się po kilkunastu sekundach."""
+    (5, 10, 20, 40, 60, 60 s, z losowym rozrzutem +-40%), zamiast poddawać się po kilkunastu sekundach."""
     last = None
     for i in range(attempts):
         try:
@@ -124,7 +125,7 @@ def http_get(url, headers=None, attempts=7, timeout=120):
         except Exception as e:
             last = e
             if i < attempts - 1:
-                time.sleep(min(60, 5 * 2 ** i))
+                time.sleep(min(60, 5 * 2 ** i) * random.uniform(0.6, 1.4))   # jitter: watki nie ponawiaja jednoczesnie
     raise RuntimeError(f"{url}: {last}")
 
 
