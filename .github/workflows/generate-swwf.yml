@@ -2,11 +2,17 @@ name: SWWF - generuj prognoze
 
 on:
   workflow_dispatch:   # nadal mozna uruchomic recznie, przyciskiem
+    inputs:
+      ifs:
+        description: 'Zespol: off = tylko GEFS, on = GEFS + IFS ENS (puste = wartosc ze zmiennej repo SWWF_IFS, domyslnie off)'
+        type: choice
+        options: ['', 'off', 'on']
+        default: ''
   schedule:
-    # uruchamia sie samo, cztery razy dziennie: 5:00, 11:00, 17:00, 23:00 UTC
-    # (kilka godzin po kazdym przebiegu GEFS 00/06/12/18Z, zeby dane zdazyly
-    # sie pojawic na AWS zanim je pobierzemy)
-    - cron: '0 5,11,17,23 * * *'
+    # uruchamia sie samo, cztery razy dziennie: 1:30, 7:30, 13:30, 19:30 UTC.
+    # Przesuniete o 2,5 h wzgledem dawnych 5/11/17/23 UTC, bo IFS ENS (ECMWF) udostepnia kroki 0-72 h
+    # przebiegu 00/06/12/18Z dopiero ok. 6:40-6:55 / 12:40 / 18:40 / 0:40 UTC (GEFS jest gotowy wczesniej).
+    - cron: '30 1,7,13,19 * * *'
 
 # domyslny token GitHub Actions ma prawo tylko ODCZYTU repo (widziales to w logu:
 # "Contents: read") - zeby workflow mogl sam zapisac wynik z powrotem, trzeba
@@ -22,6 +28,7 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -32,13 +39,19 @@ jobs:
           python-version: "3.12"
 
       - name: Zainstaluj biblioteki
-        run: pip install herbie-data matplotlib geojsoncontour scipy shapely
+        run: pip install herbie-data matplotlib geojsoncontour scipy shapely eccodes requests
 
       - name: Wygeneruj swwf.json
         env:
-          # o 05:00 UTC przebieg 00z bywa jeszcze niekompletny na AWS (fxx=72) - zamiast cofac
-          # sie na 18z (i tracic archiwum 00z potrzebne do weryfikacji opadu) czekamy do 90 min
+          # przebieg GEFS bywa jeszcze niekompletny na AWS (fxx=72) - zamiast cofac sie na starszy
+          # (i tracic archiwum 00z potrzebne do weryfikacji opadu) czekamy do 90 min
           SWWF_WAIT_MINUTES: "90"
+          # drugi model zespolu: IFS ENS (ECMWF). off = tylko GEFS (jak dotad), on = GEFS + IFS z fallbackiem na
+          # sam GEFS. Przelacznik: zmienna repozytorium SWWF_IFS (Settings > Secrets and variables > Actions > Variables)
+          SWWF_IFS: ${{ inputs.ifs || vars.SWWF_IFS || 'off' }}
+          SWWF_IFS_WAIT_MINUTES: "120"  # ile czekac na kompletny przebieg IFS (liczone od startu; potem awaryjnie sam GEFS)
+          IFS_WORKERS: "8"
+          PYTHONUNBUFFERED: "1"   # log na zywo (bez tego wypisuje sie dopiero po zakonczeniu)
         run: python generate_swwf.py
 
       - name: Zapisz wynik z powrotem do repo
