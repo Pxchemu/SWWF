@@ -45,6 +45,7 @@ def main():
     ap.add_argument("--files", nargs="+", required=True)
     ap.add_argument("--labels", nargs="+", default=None)
     ap.add_argument("--out", default="reports/porownanie_modeli.md")
+    ap.add_argument("--pairs", default=None, help="pary do porównania jako indeksy (od 0) 'A:B,A:B', np. 3:1,3:2; domyślnie: każdy od 3. wzwyż vs 1. i 2. oraz 2. vs 1.")
     a = ap.parse_args()
     labels = a.labels or [os.path.basename(f).replace("scores_", "").replace(".npz", "") for f in a.files]
     if len(labels) != len(a.files):
@@ -54,7 +55,10 @@ def main():
     if not names:
         sys.exit("Brak wspólnych ocen w plikach")
     n = len(data)
-    pairs = [(j, i) for j in range(2, n) for i in (0, 1)] + ([(1, 0)] if n >= 2 else [])
+    if a.pairs:
+        pairs = [tuple(int(x) for x in p.split(":")) for p in a.pairs.split(",") if p.strip()]
+    else:
+        pairs = [(j, i) for j in range(2, n) for i in (0, 1)] + ([(1, 0)] if n >= 2 else [])
     OUT = []
 
     def say(t=""):
