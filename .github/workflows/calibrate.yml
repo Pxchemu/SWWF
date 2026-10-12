@@ -72,6 +72,7 @@ jobs:
           if [ -n "$COMMON_WITH" ]; then ARGS+=(--common-with "$COMMON_WITH"); fi
           if [ -n "$POOL_WITH" ]; then ARGS+=(--pool-with "$POOL_WITH" --pool-weights "${POOL_WEIGHTS:-5:3}"); fi
           if [ -n "$SKIP_SECTIONS" ]; then ARGS+=(--skip "$SKIP_SECTIONS"); fi
+          ARGS+=(--scores-out "reports/scores_${NAME}.npz")
           python calibrate_swwf.py "${ARGS[@]}"
 
       - name: Zapisz raport do repo
