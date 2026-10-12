@@ -8,6 +8,7 @@ Użycie:
 Wynik trafia do osobnego folderu:
     backtest/2025-12-30_00z/swwf.json
     backtest/2025-12-30_00z/archive/2025-12-30_00z.json
+    (z SWWF_IFS=on: backtest/2025-12-30_00z_ifs/..., zespół GEFS + IFS ENS; IFS dla tak starych przebiegów jest na AWS od 2024-03)
 
 Działa przez wywołanie PRODUKCYJNEGO generate_swwf.py (ta sama klasyfikacja, te same progi),
 z podmienioną jedynie funkcją wyboru przebiegu i zmienionym folderem zapisu — dzięki temu
@@ -62,10 +63,12 @@ def main():
 
     # generate_swwf.py zapisuje do ścieżek względnych (swwf.json, archive/) — wchodząc do
     # osobnego folderu nie nadpisujemy produkcyjnej prognozy
-    out_dir = os.path.join(repo_root, "backtest", run_time.strftime("%Y-%m-%d_%Hz"))
+    # z IFS (SWWF_IFS=on) wynik idzie do osobnego folderu z sufiksem _ifs, żeby można było porównać ze samym GEFS
+    ifs_on = os.environ.get("SWWF_IFS", "off").strip().lower() == "on"
+    out_dir = os.path.join(repo_root, "backtest", run_time.strftime("%Y-%m-%d_%Hz") + ("_ifs" if ifs_on else ""))
     os.makedirs(out_dir, exist_ok=True)
     os.chdir(out_dir)
-    print(f"Backtest: przebieg {run_time.isoformat()}, wynik w {out_dir}")
+    print(f"Backtest: przebieg {run_time.isoformat()}, zespół: {'GEFS + IFS ENS' if ifs_on else 'tylko GEFS'}, wynik w {out_dir}")
     gen.main()
 
 
