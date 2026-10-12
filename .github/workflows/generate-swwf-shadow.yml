@@ -9,10 +9,14 @@ name: SWWF - shadow IFS (test zespolu, bez wplywu na produkcje)
 on:
   workflow_dispatch:
     inputs:
+      run:
+        description: 'Przebieg do przeliczenia: "RRRR-MM-DD GG" (UTC, GG = 00/06/12/18), np. 2026-10-12 06. Puste = najnowszy dostepny. IFS trzyma ok. 3 dob, wiec mozna testowac od razu na starszym przebiegu.'
+        required: false
+        default: ''
       ifs_wait:
         description: 'Ile minut czekac na kompletny przebieg IFS'
         required: false
-        default: '60'
+        default: '120'
 
 permissions:
   contents: write
@@ -24,7 +28,7 @@ concurrency:
 jobs:
   shadow:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 300
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -41,6 +45,7 @@ jobs:
         env:
           SWWF_WAIT_MINUTES: "90"
           SWWF_IFS: shadow
+          SWWF_RUN: ${{ inputs.run }}
           SWWF_IFS_WAIT_MINUTES: ${{ inputs.ifs_wait }}
           IFS_WORKERS: "8"
         run: |
