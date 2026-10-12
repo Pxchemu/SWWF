@@ -7,6 +7,12 @@ on:
         description: 'Przebieg GEFS do przeliczenia, czas UTC, format "RRRR-MM-DD GG:00" (GG = 00, 06, 12 lub 18)'
         required: true
         default: '2025-12-30 00:00'
+      ifs:
+        description: 'Zespol: off = tylko GEFS (jak dotad), on = GEFS + IFS ENS (wynik w folderze z sufiksem _ifs)'
+        required: false
+        default: 'off'
+        type: choice
+        options: ['off', 'on']
 
 permissions:
   contents: write
@@ -17,6 +23,10 @@ jobs:
     timeout-minutes: 120
     env:
       RUN_TIME: ${{ inputs.run_time }}
+      SWWF_IFS: ${{ inputs.ifs }}
+      SWWF_IFS_WAIT_MINUTES: "10"     # przebieg historyczny jest od razu dostepny; krotkie czekanie wystarczy
+      IFS_WORKERS: "8"
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -27,7 +37,7 @@ jobs:
           python-version: "3.12"
 
       - name: Zainstaluj biblioteki
-        run: pip install herbie-data matplotlib geojsoncontour scipy shapely
+        run: pip install herbie-data matplotlib geojsoncontour scipy shapely eccodes requests
 
       - name: Przelicz backtest (nie rusza produkcyjnego swwf.json)
         run: python backtest_swwf.py "$RUN_TIME"
@@ -38,7 +48,7 @@ jobs:
           git config user.email "actions@github.com"
           git add backtest/
           git diff --staged --quiet && exit 0
-          git commit -m "Backtest SWWF: $RUN_TIME UTC"
+          git commit -m "Backtest SWWF: $RUN_TIME UTC (IFS: $SWWF_IFS)"
           # w miedzyczasie mogl sie wykonac zwykly workflow generate (push na main) —
           # stad rebase i ponawianie, zeby backtesty nie przegrywaly wyscigu o push
           for i in 1 2 3 4 5; do
