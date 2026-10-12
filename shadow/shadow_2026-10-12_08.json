@@ -1,0 +1,10 @@
+{
+  "model_run": "2026-10-12T08:00:00+0200",
+  "issued": "2026-10-12T17:58:08+0200",
+  "ensemble": "GEFS",
+  "members_gefs": 30,
+  "members_ifs": 0,
+  "cold_bias_c": -1.0,
+  "ifs": null,
+  "days": []
+}
