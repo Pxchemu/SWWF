@@ -42,6 +42,8 @@ COLD_AIR_BIAS_PROD = -1.0          # korekta produkcyjna z generate_swwf.py (COL
 VIS_BLIZZARD_M = 400.0
 OUT = []
 SKIP = set()          # sekcje pomijane przez --skip (ice, blizzard)
+MODEL = "GEFS"        # podpis modelu w raporcie (GEFS / IFS ENS / GEFS+IFS)
+NO_WIND = False       # True dla IFS i zespołu połączonego: IFS nie ma wiatru ani wilgotności w tym hindcaście
 
 
 def say(text=""):
@@ -263,22 +265,22 @@ def section_precip(runs, obs):
         O = s.obs("SMDB"); ok = np.isfinite(O); P = s.M["P"][ok]; O = O[ok]
         mean = P.mean(axis=1); wet = O >= 1
         say(f"### wyprzedzenie k={k}: n={len(O)} stacjodni, mokrych (>=1 mm) {int(wet.sum())}")
-        say(f"- średnia obs {O.mean():.2f} mm, GEFS {mean.mean():.2f} mm; korelacja sqrt = {np.corrcoef(np.sqrt(mean), np.sqrt(O))[0,1]:.3f}")
+        say(f"- średnia obs {O.mean():.2f} mm, {MODEL} {mean.mean():.2f} mm; korelacja sqrt = {np.corrcoef(np.sqrt(mean), np.sqrt(O))[0,1]:.3f}")
         if wet.sum():
-            say(f"- dni mokre: GEFS/obs = {mean[wet].mean() / O[wet].mean():.2f}; obs > max zespołu: {((O > P.max(axis=1)) & wet).sum() / wet.sum() * 100:.1f}% dni mokrych")
+            say(f"- dni mokre: {MODEL}/obs = {mean[wet].mean() / O[wet].mean():.2f}; obs > max zespołu: {((O > P.max(axis=1)) & wet).sum() / wet.sum() * 100:.1f}% dni mokrych")
         for thr in (1, 5, 10):
             say(f"- P(opad>={thr} mm): " + reliability((P >= thr).mean(axis=1), O >= thr))
     say()
 
 
 def section_snow(runs, obs):
-    have_rh = all("rh_end" in r["arr"] and np.isfinite(r["arr"]["rh_end"]).any() for r in runs.values())
+    have_rh = (not NO_WIND) and all("rh_end" in r["arr"] and np.isfinite(r["arr"]["rh_end"]).any() for r in runs.values())
     variants = phase_variants(have_rh)
     say("## 2. Śnieg — metody rozpoznawania fazy opadu (okno 06->06 UTC)")
     say("Zdarzenie obserwowane: opad rodzaju S (śnieg) o sumie >= X mm. Prognoza: P(opad zamarznięty >= X mm) wg metody. "
         "Kolumna 'deszcz->śnieg' = odsetek dni z obserwowanym DESZCZEM >=3 mm, w których metoda daje P(śnieg>=3 mm) >= 30% (fałszywy śnieg).")
     if not have_rh:
-        say("(brak pól wilgotności w danych — warianty z mokrym termometrem pominięte; użyj hindcast_v2/)")
+        say("(brak pól wilgotności w danych albo zespół z IFS (IFS nie ma wilgotności) — warianty z mokrym termometrem pominięte)")
     def extra(A, w):
         ap = A["apcp"][:, :, w]; te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
         cp = A["cpofp_end"][:, :, w] if "cpofp_end" in A else np.full_like(ap, np.nan)
@@ -312,14 +314,15 @@ def section_snow(runs, obs):
 
 
 def section_cold(runs, obs):
-    have_uv = all("u10_end" in r["arr"] and np.isfinite(r["arr"]["u10_end"]).any() for r in runs.values())
+    have_uv = (not NO_WIND) and all("u10_end" in r["arr"] and np.isfinite(r["arr"]["u10_end"]).any() for r in runs.values())
     say("## 3. Mróz — temperatura powietrza vs odczuwalna (okno doby kalendarzowej 00-24 UTC; obserwacja = TMIN powietrza)")
     say("Uwaga: IMGW mierzy tylko temperaturę powietrza, więc odczuwalnej NIE da się zweryfikować wprost; poniżej sprawdzamy, jak daleko od powietrza jest każda wersja i czy 'odczuwalna' nie robi fałszywych alarmów względem realnego mrozu.")
     def extra(A, w):
         te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
-        ge = A["gust_end"][:, :, w]; gm = A["gust_mid"][:, :, w]
-        d = {"air": np.minimum(np.nanmin(te, axis=2), np.nanmin(tm, axis=2)),
-             "feels_gust": np.minimum(np.nanmin(wind_chill(te, ge), axis=2), np.nanmin(wind_chill(tm, gm), axis=2))}
+        d = {"air": np.minimum(np.nanmin(te, axis=2), np.nanmin(tm, axis=2))}
+        if not NO_WIND:
+            ge = A["gust_end"][:, :, w]; gm = A["gust_mid"][:, :, w]
+            d["feels_gust"] = np.minimum(np.nanmin(wind_chill(te, ge), axis=2), np.nanmin(wind_chill(tm, gm), axis=2))
         if have_uv:
             we = np.hypot(A["u10_end"][:, :, w], A["v10_end"][:, :, w]); wm = np.hypot(A["u10_mid"][:, :, w], A["v10_mid"][:, :, w])
             d["feels_mean"] = np.minimum(np.nanmin(wind_chill(te, we), axis=2), np.nanmin(wind_chill(tm, wm), axis=2))
@@ -728,6 +731,61 @@ def section_cold_spread(runs, obs):
     say()
 
 
+
+# ----------------------------------------------------------------------------- oceny probabilistyczne (do porównania modeli)
+def crps_ens(X, y):
+    """CRPS zespołu: X [próbki, członkowie], y [próbki]. CRPS = E|X-y| - 0.5 E|X-X'| (dokładnie, przez sortowanie)."""
+    X = np.sort(X, axis=1)
+    n = X.shape[1]
+    w = 2 * np.arange(1, n + 1) - n - 1
+    return np.mean(np.abs(X - y[:, None]), axis=1) - (X * w).sum(axis=1) / (n * n)
+
+
+def section_scores(runs, obs, store):
+    """Oceny, które NIE zależą od wyboru progu alarmu (mniej szumu niż POD/CSI na kilkudziesięciu zdarzeniach):
+    CRPS (ciągłe: TMIN, opad doby) i Brier (zdarzenia). Niższe = lepiej. Wektory per stacjodzień trafiają do `store`
+    (--scores-out), a compare_models.py porównuje modele PARAMI na tych samych stacjodniach z przedziałem ufności."""
+    say("## 8. Oceny probabilistyczne (CRPS, Brier — niższe = lepiej; wektory zapisane do porównania modeli parami)")
+    def cold_extra(A, w):
+        return {"v": np.minimum(np.nanmin(A["t_end"][:, :, w], axis=2), np.nanmin(A["t_mid"][:, :, w], axis=2))}
+    def precip_extra(A, w):
+        return {"v": A["apcp"][:, :, w].sum(axis=2)}
+    def snow_extra(A, w):
+        ap = A["apcp"][:, :, w]; te = A["t_end"][:, :, w]; tm = A["t_mid"][:, :, w]
+        return {"v": (ap * clipf((3.0 - np.minimum(te, tm)) / 2.0)).sum(axis=2)}
+    def put(name, s_, ok, vals):
+        keys = np.array([f"{m[0]}|{m[2]}" for m in s_.meta])[ok]
+        store[name + "__keys"] = keys.astype("S")                 # bajty zamiast unicode: 4x mniejszy plik
+        store[name + "__vals"] = np.asarray(vals, dtype=np.float32)
+        say(f"- {name}: n={len(vals)}, średnia {np.mean(vals):.4f}")
+    for k in (0, 1, 2):
+        say(f"### wyprzedzenie k={k}")
+        s0 = build_sample(runs, obs, k, 0, cold_extra)
+        if s0.n:
+            TM = s0.obs("TMIN"); ok = np.isfinite(TM) & np.isfinite(s0.M["v"]).all(axis=1)
+            X = s0.M["v"][ok]; y = TM[ok]
+            put(f"tmin_crps_k{k}", s0, ok, crps_ens(X, y))
+            for thr in (-5, -10, -15):
+                if (y <= thr).sum() >= 5:
+                    put(f"tmin_le{abs(thr)}_brier_k{k}", s0, ok, ((X <= thr).mean(axis=1) - (y <= thr)) ** 2)
+        s1 = build_sample(runs, obs, k, 6, precip_extra)
+        if s1.n:
+            O = s1.obs("SMDB"); ok = np.isfinite(O) & np.isfinite(s1.M["v"]).all(axis=1)
+            X = s1.M["v"][ok]; y = O[ok]
+            put(f"precip_crps_k{k}", s1, ok, crps_ens(X, y))
+            for thr in (1, 5, 10):
+                if (y >= thr).sum() >= 5:
+                    put(f"precip_ge{thr}_brier_k{k}", s1, ok, ((X >= thr).mean(axis=1) - (y >= thr)) ** 2)
+        s2 = build_sample(runs, obs, k, 6, snow_extra)
+        if s2.n:
+            O = s2.obs("SMDB"); ok = np.isfinite(O) & np.isfinite(s2.M["v"]).all(axis=1)
+            y = np.where(s2.roop() == "S", O, 0.0)[ok]; X = s2.M["v"][ok]
+            for thr in (1, 3):
+                if (y >= thr).sum() >= 5:
+                    put(f"snow_ge{thr}_brier_k{k}", s2, ok, ((X >= thr).mean(axis=1) - (y >= thr)) ** 2)
+    say()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hindcast", default="hindcast_v2")
@@ -743,6 +801,11 @@ def main():
     ap.add_argument("--pool-weights", default="5:3",
                     help="powtórzenia członków A:B przy łączeniu; 5:3 = ~równa waga modeli przy 30 (GEFS) i 51 (IFS) członkach, 1:1 = zwykłe złączenie")
     ap.add_argument("--pool-min-members", type=int, default=50, help="minimalna liczba członków drugiego modelu")
+    ap.add_argument("--common-min-members", type=int, default=None,
+                    help="minimalna liczba członków w drugim folderze przy --common-with (domyślnie 50 gdy nazwa folderu zawiera 'ifs', inaczej 30) — "
+                         "dzięki temu raporty GEFS, IFS i zespołu liczą dokładnie te same daty")
+    ap.add_argument("--scores-out", default=None,
+                    help="plik .npz z wektorami ocen per stacjodzień (sekcja 8) do porównania modeli parami (compare_models.py)")
     ap.add_argument("--skip", default="",
                     help="sekcje do pominięcia, po przecinku: ice, blizzard (np. dla IFS, który nie ma CFRZR/VIS)")
     a = ap.parse_args()
@@ -763,7 +826,8 @@ def main():
         sys.exit(f"Brak pełnych przebiegów 00Z (>= {a.min_members} członków) w {hd}")
     if a.common_with:
         other_dir = a.common_with if os.path.isabs(a.common_with) else os.path.join(here, a.common_with)
-        other = load_runs(other_dir, 1)
+        cmin = a.common_min_members if a.common_min_members is not None else (50 if "ifs" in os.path.basename(other_dir.rstrip("/")).lower() else 30)
+        other = load_runs(other_dir, cmin)
         runs = {k: v for k, v in runs.items() if k in other}
         if not runs:
             sys.exit(f"Brak wspólnych przebiegów z {other_dir}")
@@ -777,6 +841,11 @@ def main():
             sys.exit(f"Brak wspólnych kompletnych przebiegów z {pdir}")
         n_any = next(iter(runs.values()))["arr"]["apcp"].shape[0]
         pool_info = f"zespół POŁĄCZONY: {os.path.basename(hd)} x{wa} + {os.path.basename(pdir)} x{wb} = {n_any} członków (waga modeli ~ {wa}*A : {wb}*B)"
+    global MODEL, NO_WIND
+    if a.pool_with:
+        MODEL, NO_WIND = "GEFS+IFS", True
+    elif "ifs" in os.path.basename(hd.rstrip("/")).lower():
+        MODEL, NO_WIND = "IFS ENS", True
     n_members = sorted({len(json.load(gzip.open(p, "rt", encoding="utf-8"))["members"])
                         for p in sorted(glob.glob(os.path.join(hd, "*.json.gz")))[:3]})
     obs = load_obs(obs_path)
@@ -801,6 +870,13 @@ def main():
     section_snow_ratio(obs)
     section_snow_cm(runs, obs)
     section_cold_spread(runs, obs)
+    store = {}
+    section_scores(runs, obs, store)
+    if a.scores_out and store:
+        sp = a.scores_out if os.path.isabs(a.scores_out) else os.path.join(here, a.scores_out)
+        os.makedirs(os.path.dirname(sp), exist_ok=True)
+        np.savez_compressed(sp, **store)
+        print(f"Zapisano wektory ocen: {sp}")
     out = a.out if os.path.isabs(a.out) else os.path.join(here, a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
