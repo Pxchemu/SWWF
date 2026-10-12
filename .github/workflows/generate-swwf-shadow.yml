@@ -48,6 +48,7 @@ jobs:
           SWWF_RUN: ${{ inputs.run }}
           SWWF_IFS_WAIT_MINUTES: ${{ inputs.ifs_wait }}
           IFS_WORKERS: "8"
+          PYTHONUNBUFFERED: "1"   # log na zywo (bez tego wypisuje sie dopiero po zakonczeniu)
         run: |
           START=$(date +%s)
           python generate_swwf.py
