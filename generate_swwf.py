@@ -858,7 +858,9 @@ def main():
     n_ifs = ifs_ok if use_ifs else 0
     print(f"Skład zespołu: {ensemble} (GEFS {n_gefs if use_gefs else 0}, IFS {n_ifs}); korekta zimna {cold_bias:+.1f} °C")
     n_total_used = (n_gefs if use_gefs else 0) + n_ifs
-    n_total_nominal = (NOMINAL_MEMBERS["GEFS"] if use_gefs else 0) + (NOMINAL_MEMBERS["IFS"] if use_ifs else 0)
+    # nominalna liczność IFS = tylu członków, ilu IFS faktycznie opublikował w tym przebiegu (51 z kontrolnym, 50 bez)
+    ifs_nominal = int(ifs["stats"].get("members_total", NOMINAL_MEMBERS["IFS"])) if use_ifs else 0
+    n_total_nominal = (NOMINAL_MEMBERS["GEFS"] if use_gefs else 0) + ifs_nominal
     squalls_available = use_gefs
 
     days_out = []
