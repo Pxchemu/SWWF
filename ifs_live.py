@@ -52,9 +52,15 @@ def wait_for_base(run, wait_minutes, log=print):
                 return base
         if time.time() >= deadline:
             return None
+        left = (deadline - time.time()) / 60
         if first:
-            log(f"IFS: przebieg {run:%Y-%m-%d %Hz} jeszcze niedostępny — czekam (do {wait_minutes} min)...")
+            log(f"IFS: przebieg {run:%Y-%m-%d %Hz} jeszcze niedostępny — czekam (do {wait_minutes} min), "
+                f"sprawdzam co 2 min...")
             first = False
+            last_note = time.time()
+        elif time.time() - last_note >= 600:
+            log(f"IFS: nadal niedostępny, do końca czekania {left:.0f} min")
+            last_note = time.time()
         time.sleep(120)
 
 
@@ -151,11 +157,15 @@ def fetch_field(base, run, step, offset, length, region):
 def load_ifs(run, region, wait_minutes=45, log=print):
     t0 = time.time()
     b0, r0, g0 = A.STATS["bytes"], A.STATS["requests"], A.STATS["google_ok"]
+    _log = log
+    log = lambda m: _log(f"[{time.strftime('%H:%M:%S', time.gmtime())} UTC] {m}")   # znacznik czasu w każdej linii IFS
+    log(f"IFS: start ({run:%Y-%m-%d %Hz})")
     base = wait_for_base(run, wait_minutes, log)
     if base is None:
         log(f"IFS: brak przebiegu {run:%Y-%m-%d %Hz} po {wait_minutes} min — pomijam IFS.")
         return None
     t_avail = time.time() - t0
+    log(f"IFS: przebieg dostępny po {t_avail:.0f} s — pobieram i dekoduję")
 
     steps = sorted(set(STEPS_T) | set(STEPS_TP))
     index = {}
@@ -179,11 +189,16 @@ def load_ifs(run, region, wait_minutes=45, log=print):
 
     def run_pass(items):
         failed = []
+        done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futs = {ex.submit(fetch_field, base, run, s, off, ln, region): (p, m, s, off, ln)
                     for (p, m, s, off, ln) in items}
             for f in as_completed(futs):
                 p, m, s, off, ln = futs[f]
+                done += 1
+                if done % 300 == 0:
+                    log(f"IFS: {done}/{len(items)} wiadomości ({(A.STATS['bytes'] - b0) / 1e6:.0f} MB, "
+                        f"{time.time() - t0:.0f} s)")
                 lat, lon, field, why = f.result()
                 if field is None:
                     bad[(p, m, s)] = why
