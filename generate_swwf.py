@@ -40,6 +40,13 @@ UWAGA: przelicznik gęstości śniegu (funkcja snow_density_ratio), progi SQUALL
 i sama macierz SWWF_MATRIX to celowo uproszczone wartości robocze — do skalibrowania
 (patrz plan projektu).
 
+UWAGA 1b (2026-10): ZESPÓŁ POŁĄCZONY GEFS + IFS ENS. Przełącznik SWWF_IFS = off (domyślnie, sam GEFS jak dotąd) /
+shadow (osobny plik swwf_shadow.json + shadow_report.json) / on (produkcja). IFS (51 członków, ifs_live.py) pobierany
+w tle, ten sam wycinek siatki 0,25°, ta sama logika okien 6 h i fazy opadu D; zespół 1:1 = zwykłe połączenie członków
+(GEFS 30 + IFS 51). Korekta zimna zależy od składu (GEFS -1,0; GEFS+IFS -0,5; IFS 0,0), próg sygnału to ułamek 10%
+zespołu. Snow Squalls (CAPE) tylko z GEFS. Fallbacki: brak IFS -> sam GEFS; brak GEFS -> sam IFS. Walidacja hindcastu:
+59 stacji IMGW w Polsce, wyprzedzenie do 78 h, dwie zimy (patrz plan projektu).
+
 UWAGA 2: produkt 0.25° (atmos.25) JEST w pełni dostępny na AWS dla wszystkich
 30 członków — priority=["aws"] wymuszone wszędzie, żeby nigdy po cichu nie
 spadać na zawodny NOMADS. Pobieramy tylko APCP, TMP 2 m (koniec i połowa okna) i CAPE.
@@ -55,6 +62,7 @@ artefakty interpolacji, nie realne obszary zagrożenia) — patrz grid_to_polygo
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from herbie import Herbie
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import xarray as xr
 import json
@@ -68,6 +76,8 @@ import requests
 from scipy.ndimage import zoom as ndimage_zoom
 from shapely.geometry import shape as shapely_shape, box as shapely_box, mapping as shapely_mapping, Polygon as ShapelyPolygon, MultiPolygon as ShapelyMultiPolygon
 from shapely.ops import unary_union
+from shapely.geometry import Point as ShapelyPoint
+from shapely.prepared import prep as shapely_prep
 
 LAT_MIN, LAT_MAX = 46.8, 55.5   # Niemcy/Polska/Czechy/Słowacja
 LON_MIN, LON_MAX = 5.5, 24.5
@@ -102,6 +112,15 @@ DAY_WINDOWS = [
     {"label": "Dzień 3", "windows": [(48, 54), (54, 60), (60, 66), (66, 72)]},
 ]
 MEMBERS = list(range(1, 31))
+
+# --- IFS ENS (ECMWF) jako drugi model zespołu (od 2026-10; projekt w planie SWWF) ---------------------
+# SWWF_IFS: "off" (domyślnie; zachowanie jak dotąd, tylko GEFS) | "shadow" (liczy zespół połączony, zapisuje do
+# swwf_shadow.json + shadow_report.json, NIE rusza swwf.json ani archive/) | "on" (produkcja: GEFS+IFS, a przy braku
+# IFS — samo GEFS; przy braku GEFS — sam IFS).
+IFS_MODE = os.environ.get("SWWF_IFS", "off").strip().lower()
+IFS_WAIT_MINUTES = int(os.environ.get("SWWF_IFS_WAIT_MINUTES", "45") or 0)   # tyle czekamy na kompletny przebieg IFS
+GEFS_MIN_MEMBERS_OK = 10      # poniżej tylu udanych członków GEFS (a przy działającym IFS) liczymy sam IFS
+NOMINAL_MEMBERS = {"GEFS": 30, "IFS": 51}
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
 
 
@@ -126,6 +145,9 @@ MATRIX_PROB_BINS = [0, 5, 15, 30, 45, 50, 101]  # 6 przedziałów: <5,5-15,15-30
 # niskie prawdopodobieństwo bardzo wysokiej intensywności daje HIGH/EXTREME, pojedynczy
 # odstający członek zalewałby mapę. 3 z 30 = 10%. Do dostrojenia po backtestach.
 MIN_MEMBERS_FOR_SIGNAL = 3
+# Od zespołu połączonego (GEFS + IFS) próg liczymy jako UŁAMEK liczności zespołu, nie liczbę członków:
+# 3 z 30 = 10% (jak dotąd dla samego GEFS), przy 81 członkach zespołu połączonego ~9 członków.
+MIN_MEMBER_FRACTION = MIN_MEMBERS_FOR_SIGNAL / 30.0
 
 # wiersze = przedział prawdopodobieństwa (rosnąco), kolumny = przedział intensywności
 # (rosnąco) -> wartość = indeks poziomu zagrożenia (1=SLIGHT .. 5=EXTREME).
@@ -158,6 +180,10 @@ COLD_INTENSITY_BINS_C = [-6, -10, -15, -20, -25, -30, -np.inf]   # malejąco (im
 # względem PROGNOZY, walidacja krzyżowa po miesiącach: poprawia wynik przy progach -5C i -10C,
 # neutralna przy -15C). Stała korekta, bez rozszerzania rozrzutu zespołu (to pogarszało ogon).
 COLD_AIR_BIAS_C = -1.0
+# Korekta zależna od składu zespołu (kalibracja hindcastu IFS ENS + GEFS na obserwacjach IMGW, 2026-10): sam GEFS jest za
+# ciepły w zimnie (-1,0), IFS nie ma tego błędu (0,0), a zespół 1:1 potrzebuje kompromisu (-0,5; surowe -0,0 było zbyt
+# ostrożne, -1,0 dawało ok. 2x więcej fałszywych alarmów mrozu niż -0,5).
+COLD_AIR_BIAS_BY_ENSEMBLE = {"GEFS": COLD_AIR_BIAS_C, "GEFS+IFS": -0.5, "IFS": 0.0}
 # oparte o realny próg IMGW: "intensywne opady deszczu" = powyżej 30mm/24h (stopień 1),
 # stopień 2 ~60-90mm, stopień 3 ~80-140mm (na podstawie faktycznych komunikatów IMGW) —
 # nasze wcześniejsze przedziały eskalowały dużo wcześniej niż realny próg ostrzeżenia
@@ -441,7 +467,7 @@ def _threshold_levels(prob_stack, n_members):
 
     Zwraca: level (lat, lon) 0-5, k_star (lat, lon) — numer progu, który zdecydował
     (przy remisie poziomów wygrywa większe prawdopodobieństwo)."""
-    min_prob = MIN_MEMBERS_FOR_SIGNAL / n_members * 100.0
+    min_prob = MIN_MEMBER_FRACTION * 100.0
     matrix_np = np.array(SWWF_MATRIX)
     level_k = np.zeros(prob_stack.shape, dtype=int)
     for k in range(6):
@@ -608,10 +634,96 @@ def compute_trend_blocks(days_out, run_time, prev):
 
 
 
+def window_fields(precip_window, t2m_end_c, t2m_mid_c):
+    """Wspólne dla GEFS i IFS: z opadu okna 6 h i T2m (koniec, połowa okna) liczy
+    (zimniejsza z dwóch próbek T2m, frakcja opadu zamarzniętego, grubość śniegu w cm)."""
+    t2m_coldest_c = xr.where(t2m_end_c < t2m_mid_c, t2m_end_c, t2m_mid_c)
+    frozen_fraction = ((3.0 - t2m_coldest_c) / 2.0).clip(0.0, 1.0)
+    ratio = snow_density_ratio(t2m_end_c)
+    snow_window_cm = precip_window * frozen_fraction / 10.0 * ratio
+    return t2m_coldest_c, frozen_fraction, snow_window_cm
+
+
+def ifs_member_days(ifs, m):
+    """Pola jednego członka IFS dla każdej doby: [(day_idx, opad_mm, śnieg_cm, min. T powietrza BEZ korekty)].
+    tp w IFS jest skumulowany od startu (mm po przeliczeniu z m), więc opad okna = różnica na granicach okna."""
+    data = ifs["members"][m]
+    coords = {"latitude": ifs["lat"], "longitude": ifs["lon"]}
+
+    def da(a):
+        return xr.DataArray(np.asarray(a), dims=("latitude", "longitude"), coords=coords)
+
+    out = []
+    for day_idx, day_info in enumerate(DAY_WINDOWS):
+        precip_total = snow_total = min_air = None
+        for start, end in day_info["windows"]:
+            tp_start = data["tp"][start] if start > 0 else 0.0
+            precip_window = da(np.clip(data["tp"][end] - tp_start, 0.0, None))
+            t_end = da(data["t"][end])
+            t_mid = da(data["t"][start + 3])
+            coldest, _, snow_window = window_fields(precip_window, t_end, t_mid)
+            precip_total = precip_window if precip_total is None else precip_total + precip_window
+            snow_total = snow_window if snow_total is None else snow_total + snow_window
+            min_air = coldest if min_air is None else xr.where(coldest < min_air, coldest, min_air)
+        out.append((day_idx, precip_total, snow_total, min_air))
+    return out
+
+
+def stack_members(arrs, lat_ref, lon_ref):
+    """(member, lat, lon) z listy pól jednego hazardu; współrzędne ustawiamy jawnie (GEFS i IFS mają
+    te same węzły, ale z różnymi dodatkowymi współrzędnymi skalarnymi, które psują xr.concat)."""
+    vals = []
+    for a in arrs:
+        if isinstance(a, xr.DataArray):
+            a = a.transpose("latitude", "longitude").values
+        vals.append(np.asarray(a))
+    return xr.DataArray(np.stack(vals), dims=("member", "latitude", "longitude"),
+                        coords={"latitude": lat_ref, "longitude": lon_ref})
+
+
+def latest_ifs_run_guess():
+    """Gdy GEFS jest zupełnie niedostępny: najnowszy przebieg IFS, który powinien już być kompletny (~7 h po starcie)."""
+    t = datetime.now(timezone.utc) - timedelta(hours=7)
+    t = t.replace(minute=0, second=0, microsecond=0)
+    return t - timedelta(hours=t.hour % 6)
+
+
+def cold_bias_note(bias):
+    return "bez korekty" if abs(bias) < 1e-9 else f"z korekta {bias:+.1f}C".replace(".", ",")
+
+
+def level_counts(level_grid, inside):
+    arr = np.asarray(level_grid)[inside]
+    return [int((arr == k).sum()) for k in range(len(MATRIX_LEVEL_NAMES))]
+
+
 def main():
-    run_time = find_latest_run()
-    previous_result = load_previous_result()
-    print(f"Używam przebiegu: {run_time.isoformat()}")
+    ifs_mode = IFS_MODE if IFS_MODE in ("shadow", "on") else "off"
+    shadow = ifs_mode == "shadow"
+    out_json = "swwf_shadow.json" if shadow else "swwf.json"
+
+    gefs_run_error = None
+    try:
+        run_time = find_latest_run()
+    except Exception as e:
+        if ifs_mode == "off":
+            raise
+        gefs_run_error = e
+        run_time = latest_ifs_run_guess()
+        print(f"GEFS niedostępny ({e}) — próbuję samego IFS dla przebiegu {run_time:%Y-%m-%d %Hz}")
+    previous_result = load_previous_result(out_json)
+    print(f"Używam przebiegu: {run_time.isoformat()}  (SWWF_IFS={ifs_mode})")
+
+    # IFS pobieramy w tle, równolegle z (wolną) pętlą GEFS; wynik odbieramy po jej zakończeniu
+    ifs_executor = ifs_future = None
+    if ifs_mode != "off":
+        try:
+            import ifs_live
+            ifs_executor = ThreadPoolExecutor(max_workers=1)
+            ifs_future = ifs_executor.submit(ifs_live.load_ifs, run_time,
+                                             (LAT_MIN, LAT_MAX, LON_MIN_360, LON_MAX_360), IFS_WAIT_MINUTES)
+        except Exception as e:
+            print(f"IFS: nie można uruchomić pobierania ({type(e).__name__}: {e}) — tylko GEFS")
 
     print("Pobieram granice lądu (Natural Earth)...")
     country_mask = build_country_mask()
@@ -620,12 +732,12 @@ def main():
     # zbieramy osobno dla każdej z trzech dób — precip_member_grids[0] to DAY1, [1] DAY2, [2] DAY3
     precip_member_grids = [[] for _ in DAY_WINDOWS]
     snow_member_grids = [[] for _ in DAY_WINDOWS]
-    cold_member_grids = [[] for _ in DAY_WINDOWS]
+    cold_member_grids = [[] for _ in DAY_WINDOWS]       # minimum T powietrza BEZ korekty (korekta dodawana po złożeniu zespołu)
     squall_cape_member_grids = [[] for _ in DAY_WINDOWS]
     failed = []
     lats = lons = None
 
-    for m in MEMBERS:
+    for m in (MEMBERS if gefs_run_error is None else []):
         # wyniki członka trzymamy osobno i dopisujemy do wspólnych list DOPIERO, gdy udały się
         # wszystkie doby — częściowo pobrany członek nie rozjeżdża liczności między dobami
         staged = []
@@ -660,20 +772,17 @@ def main():
                     # zimniejsza z dwóch próbek okna: 1 przy <=1C, liniowo do 0 przy 3C. Wygrało z
                     # CPOFP z modelu na każdym wyprzedzeniu (patrz docstring), więc CPOFP nie jest
                     # już pobierane. Przelicznik gęstości liczony z T2m na końcu okna (jak dotąd).
-                    t2m_coldest_c = xr.where(t2m_end_c < t2m_mid_c, t2m_end_c, t2m_mid_c)
-                    frozen_fraction = ((3.0 - t2m_coldest_c) / 2.0).clip(0.0, 1.0)
-                    ratio = snow_density_ratio(t2m_end_c)
-                    snow_window_cm = precip_window * frozen_fraction / 10.0 * ratio
+                    t2m_coldest_c, frozen_fraction, snow_window_cm = window_fields(precip_window, t2m_end_c, t2m_mid_c)
 
                     precip_total = precip_window if precip_total is None else precip_total + precip_window
                     snow_total = snow_window_cm if snow_total is None else snow_total + snow_window_cm
 
-                    # --- COLD: temperatura POWIETRZA z korektą COLD_AIR_BIAS_C, minimum z 8 próbek ---
-                    air_min_window = t2m_coldest_c + COLD_AIR_BIAS_C
-                    min_air_c = air_min_window if min_air_c is None else \
-                        xr.where(air_min_window < min_air_c, air_min_window, min_air_c)
+                    # --- COLD: temperatura POWIETRZA, minimum z 8 próbek; korektę (COLD_AIR_BIAS_BY_ENSEMBLE)
+                    # dodajemy dopiero do złożonego zespołu (minimum i dodanie stałej przemiennie) ---
+                    min_air_c = t2m_coldest_c if min_air_c is None else \
+                        xr.where(t2m_coldest_c < min_air_c, t2m_coldest_c, min_air_c)
 
-                    # --- SNOW SQUALLS: CAPE + aktywny, w większości zamarznięty opad ---
+                    # --- SNOW SQUALLS: CAPE + aktywny, w większości zamarznięty opad (tylko GEFS) ---
                     H_cape = Herbie(run_time.strftime("%Y-%m-%d %H:%M"), model="gefs", product="atmos.25",
                                     member=m, fxx=fxx, priority=["aws"], verbose=False)
                     ds_cape = xarray_with_retry(H_cape, ":CAPE:surface:")
@@ -699,20 +808,105 @@ def main():
             failed.append(m)
             print(f"  człon {m:>2}: BŁĄD ({e})")
 
-    if not precip_member_grids[0]:
+    # --- odbiór IFS i decyzja o składzie zespołu ---
+    ifs = None
+    if ifs_future is not None:
+        try:
+            ifs = ifs_future.result()
+        except Exception as e:
+            print(f"IFS: BŁĄD pobierania ({type(e).__name__}: {e}) — tylko GEFS")
+        ifs_executor.shutdown(wait=False)
+    n_gefs = len(precip_member_grids[0])
+    use_ifs = ifs is not None
+    use_gefs = n_gefs >= GEFS_MIN_MEMBERS_OK or (n_gefs >= 1 and not use_ifs)
+    if use_gefs and use_ifs:
+        gl = np.array(precip_member_grids[0][0].latitude.values, dtype=float)
+        gn = np.array(precip_member_grids[0][0].longitude.values, dtype=float)
+        if gl.shape != ifs["lat"].shape or gn.shape != ifs["lon"].shape or \
+                not np.allclose(gl, ifs["lat"], atol=1e-4) or not np.allclose(gn, ifs["lon"], atol=1e-4):
+            print("IFS: siatka różni się od siatki GEFS — IFS pominięty (tylko GEFS)")
+            use_ifs = False
+    if not use_gefs and not use_ifs:
         raise RuntimeError("Żaden człon się nie udał — przerywam bez zapisu pliku")
+    if not use_gefs:   # sam IFS: siatka i listy członków z IFS
+        precip_member_grids = [[] for _ in DAY_WINDOWS]
+        failed = list(MEMBERS)
+        lats = [round(float(x), 3) for x in ifs["lat"]]
+        lons = [round(float(x) - 360 if float(x) > 180 else float(x), 3) for x in ifs["lon"]]
+    lat_ref = precip_member_grids[0][0].latitude.values if use_gefs else ifs["lat"]
+    lon_ref = precip_member_grids[0][0].longitude.values if use_gefs else ifs["lon"]
+
+    ifs_precip = [[] for _ in DAY_WINDOWS]
+    ifs_snow = [[] for _ in DAY_WINDOWS]
+    ifs_cold = [[] for _ in DAY_WINDOWS]
+    ifs_ok = 0
+    if use_ifs:
+        for m in sorted(ifs["members"]):
+            try:
+                for d_idx, p_t, s_t, c_t in ifs_member_days(ifs, m):
+                    ifs_precip[d_idx].append(p_t)
+                    ifs_snow[d_idx].append(s_t)
+                    ifs_cold[d_idx].append(c_t)
+                ifs_ok += 1
+            except Exception as e:      # ifs_member_days zwraca wszystkie doby naraz, więc nic częściowego nie zostaje
+                print(f"  IFS człon {m}: BŁĄD ({e})")
+        use_ifs = ifs_ok > 0
+    if not use_gefs and not use_ifs:
+        raise RuntimeError("Żaden człon się nie udał — przerywam bez zapisu pliku")
+    ensemble = "GEFS+IFS" if (use_gefs and use_ifs) else ("GEFS" if use_gefs else "IFS")
+    cold_bias = COLD_AIR_BIAS_BY_ENSEMBLE[ensemble]
+    n_ifs = ifs_ok if use_ifs else 0
+    print(f"Skład zespołu: {ensemble} (GEFS {n_gefs if use_gefs else 0}, IFS {n_ifs}); korekta zimna {cold_bias:+.1f} °C")
+    n_total_used = (n_gefs if use_gefs else 0) + n_ifs
+    n_total_nominal = (NOMINAL_MEMBERS["GEFS"] if use_gefs else 0) + (NOMINAL_MEMBERS["IFS"] if use_ifs else 0)
+    squalls_available = use_gefs
 
     days_out = []
+    shadow_days = []
+    inside = None
+    if shadow and use_gefs and use_ifs:
+        prepared = shapely_prep(country_mask)
+        inside = np.array([[prepared.contains(ShapelyPoint(lo, la)) for lo in lons] for la in lats])
     for day_idx, day_info in enumerate(DAY_WINDOWS):
-        stacked_precip = xr.concat(precip_member_grids[day_idx], dim="member")
-        stacked_snow = xr.concat(snow_member_grids[day_idx], dim="member")
-        stacked_cold = xr.concat(cold_member_grids[day_idx], dim="member")
-        stacked_squall_cape = xr.concat(squall_cape_member_grids[day_idx], dim="member")
+        g_p = precip_member_grids[day_idx] if use_gefs else []
+        g_s = snow_member_grids[day_idx] if use_gefs else []
+        g_c = cold_member_grids[day_idx] if use_gefs else []
+        i_p, i_s, i_c = (ifs_precip[day_idx], ifs_snow[day_idx], ifs_cold[day_idx]) if use_ifs else ([], [], [])
+        stacked_precip = stack_members(g_p + i_p, lat_ref, lon_ref)
+        stacked_snow = stack_members(g_s + i_s, lat_ref, lon_ref)
+        stacked_cold = stack_members(g_c + i_c, lat_ref, lon_ref) + cold_bias
+        if use_gefs:      # Snow Squalls (CAPE) tylko z GEFS — IFS open data nie ma tu zwalidowanego odpowiednika
+            stacked_squall_cape = stack_members(squall_cape_member_grids[day_idx], lat_ref, lon_ref)
+        else:
+            stacked_squall_cape = stack_members([np.zeros(stacked_precip.shape[1:], dtype=np.float32)], lat_ref, lon_ref)
 
         precip_level, precip_median, precip_smooth, lats_s, lons_s, precip_prob, precip_iidx, precip_pidx = classify_hazard(stacked_precip, PRECIP_INTENSITY_BINS_MM, lats, lons)
         snow_level, snow_median, snow_smooth, _, _, snow_prob, snow_iidx, snow_pidx = classify_hazard(stacked_snow, SNOW_INTENSITY_BINS_CM, lats, lons)
         cold_level, cold_median, cold_smooth, _, _, cold_prob, cold_iidx, cold_pidx = classify_hazard(stacked_cold, COLD_INTENSITY_BINS_C, lats, lons, direction="le")
         squall_level, squall_median, squall_smooth, _, _, squall_prob, squall_iidx, squall_pidx = classify_hazard(stacked_squall_cape, SQUALL_INTENSITY_BINS_JKG, lats, lons)
+
+        if inside is not None:
+            # tryb shadow: ten sam przebieg policzony TYLKO z GEFS (tak działa dziś produkcja) — porównanie na polach
+            # siatki leżących w krajach SWWF (poziomy zagrożenia, zmiany komórek, różnica mediany)
+            gefs_only = {
+                "precip_24h_mm": (stack_members(g_p, lat_ref, lon_ref), PRECIP_INTENSITY_BINS_MM, "ge", precip_level, precip_median),
+                "snow_24h_cm": (stack_members(g_s, lat_ref, lon_ref), SNOW_INTENSITY_BINS_CM, "ge", snow_level, snow_median),
+                "cold_min_t2m_c": (stack_members(g_c, lat_ref, lon_ref) + COLD_AIR_BIAS_BY_ENSEMBLE["GEFS"],
+                                   COLD_INTENSITY_BINS_C, "le", cold_level, cold_median),
+            }
+            rec = {"label": day_info["label"], "hazards": {}}
+            for hk, (st, bins, dirn, pool_level, pool_med) in gefs_only.items():
+                g_level, g_med = classify_hazard(st, bins, lats, lons, direction=dirn)[:2]
+                gl, pl = np.asarray(g_level), np.asarray(pool_level)
+                diff = pl - gl
+                rec["hazards"][hk] = {
+                    "levels_gefs_only": level_counts(gl, inside), "levels_pooled": level_counts(pl, inside),
+                    "cells_up": int((diff[inside] > 0).sum()), "cells_down": int((diff[inside] < 0).sum()),
+                    "cells_inside": int(inside.sum()),
+                    "mean_abs_median_diff": round(float(np.nanmean(np.abs(np.asarray(pool_med) - np.asarray(g_med))[inside])), 3),
+                    "mean_median_diff_pooled_minus_gefs": round(float(np.nanmean((np.asarray(pool_med) - np.asarray(g_med))[inside])), 3),
+                }
+            shadow_days.append(rec)
 
         # combine_general_risk liczymy na WYGŁADZONYCH siatkach (ten sam kształt dla
         # wszystkich trzech, bo ten sam współczynnik zagęszczenia i ta sama siatka natywna)
@@ -753,7 +947,7 @@ def main():
                 },
                 "cold_min_t2m_c": {
                     "note": "Poziom zagrozenia z macierzy prawdopodobienstwo x intensywnosc (minimum "
-                            "temperatury POWIETRZA z 8 odczytow co 3h w ciagu doby, z korekta -1C "
+                            f"temperatury POWIETRZA z 8 odczytow co 3h w ciagu doby, {cold_bias_note(cold_bias)} "
                             "wynikajaca z kalibracji na obserwacjach IMGW; progi wg oficjalnych "
                             "progow IMGW dla silnego mrozu).",
                     "level_grid": cold_level,
@@ -764,6 +958,7 @@ def main():
                     "areas": grid_to_polygons(lats_s, lons_s, cold_smooth, country_mask),
                 },
                 "snow_squalls": {
+                    "available": squalls_available,
                     "note": "NOWY hazard - poziom zagrozenia z macierzy prawdopodobienstwo x "
                             "intensywnosc. Nagle, gwaltowne opady sniegu o niemal burzowym "
                             "charakterze. Intensywnosc = szczytowe CAPE (J/kg) w oknach gdzie "
@@ -789,7 +984,11 @@ def main():
         })
         print(f"  {day_info['label']}: sklasyfikowano i wygenerowano polygony")
 
-    trend_blocks = compute_trend_blocks(days_out, run_time, previous_result)
+    trend_prev = previous_result
+    if previous_result is not None and previous_result.get("ensemble", "GEFS") != ensemble:
+        print(f"Trend: poprzednie wydanie liczone z innego zespołu ({previous_result.get('ensemble', 'GEFS')} → {ensemble}) — pomijam")
+        trend_prev = None
+    trend_blocks = compute_trend_blocks(days_out, run_time, trend_prev)
     for d_idx, day in enumerate(days_out):
         for key, block in trend_blocks[d_idx].items():
             day["hazards"][key]["trend"] = block
@@ -799,8 +998,19 @@ def main():
     result = {
         "issued": to_warsaw_iso(datetime.now(timezone.utc)),
         "model_run": to_warsaw_iso(run_time),
-        "members_used": len(precip_member_grids[0]),
+        "members_used": n_total_used,
+        "members_total": n_total_nominal,
         "members_failed": failed,
+        "ensemble": ensemble,
+        "ensemble_info": {
+            "models": ([{"name": "GEFS", "provider": "NOAA/NCEP", "members": n_gefs}] if use_gefs else []) +
+                      ([{"name": "IFS ENS", "provider": "ECMWF", "members": n_ifs}] if use_ifs else []),
+            "cold_bias_c": cold_bias,
+            "min_member_fraction": round(MIN_MEMBER_FRACTION, 4),
+            "snow_squalls_available": squalls_available,
+            "attribution": ("Contains modified ECMWF open data (IFS ENS), CC BY 4.0, "
+                            "https://www.ecmwf.int/en/forecasts/datasets/open-data") if use_ifs else None,
+        },
         "grid": {"lat": lats, "lon": lons},
         "level_names": MATRIX_LEVEL_NAMES,
         "level_colors": MATRIX_LEVEL_COLORS,
@@ -827,8 +1037,9 @@ def main():
             },
             "cold_min_t2m_c": {
                 "description": "Minimum temperatury POWIETRZA (2 m) w ciągu doby, z 8 odczytów co 3h, "
-                               "z korektą -1°C wynikającą z kalibracji na obserwacjach IMGW (minima "
-                               "były średnio o ok. 1°C niższe od prognozy GEFS). Drabinka zgodna z "
+                               f"z korektą {cold_bias:+.1f}°C".replace(".", ",") + " wynikającą z kalibracji na obserwacjach IMGW "
+                               "(obserwowane minima były średnio niższe od prognozy GEFS; korekta zależy od składu "
+                               "zespołu). Drabinka zgodna z "
                                "oficjalnymi progami IMGW dla silnego mrozu: stopień 1 to -15…-25°C "
                                "(u nas od ENHANCED), stopień 2 -25…-30°C (HIGH), stopień 3 poniżej "
                                "-30°C (EXTREME). Mróz od -6°C do -15°C to najwyżej SLIGHT.",
@@ -849,8 +1060,22 @@ def main():
         "days": days_out,
     }
 
-    with open("swwf.json", "w", encoding="utf-8") as f:
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+
+    if shadow:
+        report = {"model_run": result["model_run"], "issued": result["issued"], "ensemble": ensemble,
+                  "members_gefs": n_gefs if use_gefs else 0, "members_ifs": n_ifs, "cold_bias_c": cold_bias,
+                  "ifs": ifs["stats"] if ifs else None, "days": shadow_days}
+        with open("shadow_report.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        print("\nTRYB SHADOW: zapisano swwf_shadow.json i shadow_report.json (swwf.json i archive/ bez zmian)")
+        for rec in shadow_days:
+            for hk, h in rec["hazards"].items():
+                print(f"  {rec['label']} {hk}: poziomy GEFS {h['levels_gefs_only']} → zespół {h['levels_pooled']}, "
+                      f"w górę {h['cells_up']}, w dół {h['cells_down']} z {h['cells_inside']} pól; "
+                      f"śr. różnica mediany {h['mean_median_diff_pooled_minus_gefs']:+}")
+        return
 
     # --- Archiwizacja (Faza 5 planu) — lekka kopia Dnia 1 do przyszłego porównania
     # prognoza-vs-rzeczywistość. Celowo BEZ polygonów (dużo miejsca, łatwe do odtworzenia
@@ -862,6 +1087,9 @@ def main():
         "model_run": result["model_run"],
         "valid_from": days_out[0]["valid_from"],
         "valid_to": days_out[0]["valid_to"],
+        "ensemble": ensemble,
+        "members_gefs": n_gefs if use_gefs else 0,
+        "members_ifs": n_ifs,
         "grid": result["grid"],
         "hazards": {
             key: {"level_grid": h["level_grid"], "median_intensity": h.get("median_intensity")}
@@ -872,7 +1100,7 @@ def main():
     with open(archive_filename, "w", encoding="utf-8") as f:
         json.dump(archive_record, f, ensure_ascii=False, indent=2)
 
-    print(f"\nZapisano swwf.json ({len(precip_member_grids[0])}/{len(MEMBERS)} członków użytych, "
+    print(f"\nZapisano swwf.json ({n_total_used}/{n_total_nominal} członków użytych [{ensemble}], "
           f"{len(DAY_WINDOWS)} doby)")
     print(f"Zapisano archiwum: {archive_filename}")
 
