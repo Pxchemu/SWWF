@@ -69,6 +69,53 @@ def fmt_t(s):
     return f"{WEEKDAYS[d.weekday()]} {d:%d.%m} {d:%H:%M}"
 
 
+# --- skład zespołu (od 2026-10: GEFS + IFS ENS). Pole "ensemble" w swwf.json; brak pola = stary format = sam GEFS.
+ECMWF_URL = "https://www.ecmwf.int/en/forecasts/datasets/open-data"
+
+
+def ens_kind(swwf):
+    return swwf.get("ensemble") or "GEFS"
+
+
+def ens_label(swwf):
+    """Krótka nazwa do podpisu przebiegu: GEFS / GEFS+IFS / IFS."""
+    return ens_kind(swwf)
+
+
+def ens_members(swwf):
+    return int(swwf.get("members_used") or 30)
+
+
+def ens_models_pl(swwf):
+    """„zespołu 30 prognoz GEFS" / „zespołu 81 prognoz (GEFS + IFS ENS)"."""
+    k = ens_kind(swwf)
+    n = ens_members(swwf)
+    if k == "GEFS+IFS":
+        return f"zespołu {n} prognoz (GEFS + IFS ENS)"
+    if k == "IFS":
+        return f"zespołu {n} prognoz IFS ENS"
+    return f"zespołu {n} prognoz GEFS"
+
+
+def ens_models_en(swwf):
+    k = ens_kind(swwf)
+    n = ens_members(swwf)
+    if k == "GEFS+IFS":
+        return f"{n}-member ensemble (GEFS + ECMWF IFS ENS)"
+    if k == "IFS":
+        return f"{n}-member ECMWF IFS ENS ensemble"
+    return f"{n}-member GEFS ensemble"
+
+
+def ecmwf_note(swwf, lang):
+    """Atrybucja ECMWF (CC BY 4.0) — tylko gdy w zespole jest IFS; w przeciwnym razie pusty napis."""
+    if "IFS" not in ens_kind(swwf):
+        return ""
+    if lang == "en":
+        return f"Contains modified ECMWF open data (IFS ENS), CC BY 4.0: {ECMWF_URL}"
+    return f"Zawiera zmodyfikowane dane otwarte ECMWF (IFS ENS), licencja CC BY 4.0: {ECMWF_URL}"
+
+
 # ----------------------------------------------------------------------------- geometria
 def load_voivodeships():
     """-> lista (nazwa, geometria) dla 16 województw."""
@@ -303,7 +350,7 @@ def build_message_pl(swwf, voivs, min_level=1):
     issued = parse_iso(swwf["issued"])
     out = ["SWWF — PROGNOZA ZAGROŻEŃ NA NAJBLIŻSZĄ DOBĘ",
            f"Ważna: {fmt_t(day['valid_from'])} → {fmt_t(day['valid_to'])} (czas polski)",
-           f"Przebieg GEFS: {fmt_t(swwf['model_run'])} · wydano {issued:%d.%m %H:%M}",
+           f"Przebieg {ens_label(swwf)}: {fmt_t(swwf['model_run'])} · wydano {issued:%d.%m %H:%M}",
            ""]
     paragraphs = []
     for key in ORDER:
@@ -341,8 +388,10 @@ def build_message_pl(swwf, voivs, min_level=1):
     if t:
         out.append(t)
         out.append("")
-    out.append("Własna analiza zespołu 30 prognoz GEFS — nie jest oficjalnym ostrzeżeniem IMGW. "
+    out.append(f"Własna analiza {ens_models_pl(swwf)} — nie jest oficjalnym ostrzeżeniem IMGW. "
                "Wielkości podano orientacyjnie (mediana zespołu); świeży śnieg w cm bywa przeszacowany.")
+    if ecmwf_note(swwf, "pl"):
+        out.append(ecmwf_note(swwf, "pl"))
     return "\n".join(out)
 
 
@@ -538,7 +587,7 @@ def build_message_en(swwf, countries, min_level=1):
     nice = join_en([n for n, _ in countries])
     out = ["SWWF — CENTRAL EUROPE WINTER HAZARD OUTLOOK, NEXT 24 HOURS",
            f"Valid: {fmt_t_en(day['valid_from'])} → {fmt_t_en(day['valid_to'])}",
-           f"Area: {nice} · GEFS run {fmt_t_en(swwf['model_run'])} · issued {fmt_t_en(swwf['issued'])}",
+           f"Area: {nice} · {ens_label(swwf)} run {fmt_t_en(swwf['model_run'])} · issued {fmt_t_en(swwf['issued'])}",
            ""]
     paragraphs = []
     for key in ORDER:
@@ -567,8 +616,95 @@ def build_message_en(swwf, countries, min_level=1):
     if t:
         out.append(t)
         out.append("")
-    out.append("Own analysis of a 30-member GEFS ensemble — not an official warning. Amounts are indicative "
+    out.append(f"Own analysis of the {ens_models_en(swwf)} — not an official warning. Amounts are indicative "
                "(ensemble median); fresh-snow depth in cm tends to be overestimated.")
+    if ecmwf_note(swwf, "en"):
+        out.append(ecmwf_note(swwf, "en"))
+    return "\n".join(out)
+
+
+# ============================================================================= ALERTY W CIĄGU DNIA
+ALERT_HAZARDS_DEFAULT = ["snow_24h_cm", "cold_min_t2m_c", "snow_squalls", "precip_24h_mm"]
+
+
+def detect_alerts(swwf, cells, keys=None, min_level=2, min_cells=2, test_all=False):
+    """Hazardy/doby, w których NAJWYŻSZY poziom na danym obszarze wzrósł względem poprzedniego przebiegu
+    (blok 'trend' z generatora) i wynosi co najmniej min_level na co najmniej min_cells polach siatki.
+
+    cells: {jednostka: [(i, j, lat, lon), ...]} — województwa (alert PL) albo kraje (alert EN).
+    test_all=True (tylko test ręczny): każdy hazard/doba z poziomem >= min_level traktowane jak wzrost.
+    Zwraca [(numer_doby, klucz, poziom_przedtem, poziom_teraz, blok_trendu_lub_None)]."""
+    out = []
+    for d, day in enumerate(swwf["days"]):
+        for key in (keys or ALERT_HAZARDS_DEFAULT):
+            h = day["hazards"].get(key)
+            if not h:
+                continue
+            tr = h.get("trend")
+            if not tr and not test_all:
+                continue
+            lv = h["level_grid"]
+            diff = tr["change_grid"] if tr else None
+            pairs = [(lv[i][j], lv[i][j] - (diff[i][j] if diff else 0))
+                     for cs in cells.values() for (i, j, _, _) in cs]
+            if not pairs:
+                continue
+            now_max = max(n for n, _ in pairs)
+            before_max = max(b for _, b in pairs)
+            n_hi = sum(1 for n, _ in pairs if n >= min_level)
+            if now_max >= min_level and n_hi >= min_cells and (test_all or now_max > before_max):
+                out.append((d, key, before_max, now_max, tr))
+    return out
+
+
+def build_alert_pl(swwf, voivs, alerts, cells=None, test=False):
+    names = swwf["level_names"]
+    cells = cells or cells_by_voivodeship(swwf["grid"], voivs)
+    out = [("🧪 TEST — " if test else "") + "⚠️ SWWF — ALERT: wzrost zagrożenia w Polsce",
+           f"Przebieg {ens_label(swwf)}: {fmt_t(swwf['model_run'])} · wydano {parse_iso(swwf['issued']):%d.%m %H:%M}", ""]
+    for d in sorted({a[0] for a in alerts}):
+        day = swwf["days"][d]
+        out.append(f"■ {day['label'].upper()}  ważny {fmt_t(day['valid_from'])} → {fmt_t(day['valid_to'])}")
+        for (dd, key, before, now, tr) in alerts:
+            if dd != d:
+                continue
+            res = hazard_paragraph(day, key, names, cells, 1)
+            if not res:
+                continue
+            out.append(res[1])
+            if tr:
+                ref = parse_iso(tr["reference_run"]).astimezone(timezone.utc)
+                out.append(f"  Zmiana względem przebiegu {ref:%H}Z: najwyższy poziom {names[before]} → {names[now]}.")
+        out.append("")
+    out.append(f"Własna analiza {ens_models_pl(swwf)} — nie jest oficjalnym ostrzeżeniem IMGW. Wielkości orientacyjne.")
+    if ecmwf_note(swwf, "pl"):
+        out.append(ecmwf_note(swwf, "pl"))
+    return "\n".join(out)
+
+
+def build_alert_en(swwf, countries, alerts, cells=None, test=False):
+    names = swwf["level_names"]
+    cells = cells or cells_by_voivodeship(swwf["grid"], countries)
+    nice = join_en([n for n, _ in countries])
+    out = [("🧪 TEST — " if test else "") + "⚠️ SWWF — ALERT: hazard level has increased",
+           f"Area: {nice} · {ens_label(swwf)} run {fmt_t_en(swwf['model_run'])} · issued {fmt_t_en(swwf['issued'])}", ""]
+    for d in sorted({a[0] for a in alerts}):
+        day = swwf["days"][d]
+        out.append(f"■ {day['label'].replace('Dzień', 'DAY').upper()}  valid {fmt_t_en(day['valid_from'])} → {fmt_t_en(day['valid_to'])}")
+        for (dd, key, before, now, tr) in alerts:
+            if dd != d:
+                continue
+            res = hazard_paragraph_en(day, key, names, cells, 1)
+            if not res:
+                continue
+            out.append(res[1])
+            if tr:
+                ref = parse_iso(tr["reference_run"]).astimezone(timezone.utc)
+                out.append(f"  Change since the {ref:%H}Z run: highest level {names[before]} → {names[now]}.")
+        out.append("")
+    out.append(f"Own analysis of the {ens_models_en(swwf)} — not an official warning. Amounts are indicative.")
+    if ecmwf_note(swwf, "en"):
+        out.append(ecmwf_note(swwf, "en"))
     return "\n".join(out)
 
 
