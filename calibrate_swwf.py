@@ -89,11 +89,17 @@ def load_runs(directory, min_members=30):
     return runs
 
 
-def pool_runs(runs_a, runs_b, wa, wb):
+POOL_STATS = {}
+TEMP_FIELDS = ("t_end", "t_mid")
+
+
+def pool_runs(runs_a, runs_b, wa, wb, shift_a=0.0):
     """Łączy członków dwóch modeli w jeden zespół (tylko przebiegi wspólne, stacje wspólne po kodzie).
     wa / wb = ile razy powtórzyć członków modelu A / B: 5:3 przy 30 i 51 członkach daje ~równą wagę modeli
-    (150 vs 153 członków), 1:1 = zwykłe złączenie (IFS ~63% wagi). Pola, których model nie ma, są NaN w jego części."""
+    (150 vs 153 członków), 1:1 = zwykłe złączenie (IFS ~63% wagi). Pola, których model nie ma, są NaN w jego części.
+    shift_a = stała (°C) dodawana do temperatury członków modelu A PRZED złączeniem (korekta ciepłego biasu GEFS: ujemna)."""
     out = {}
+    diffs = []
     for d in sorted(set(runs_a) & set(runs_b)):
         A_, B_ = runs_a[d], runs_b[d]
         codes_b = {st["code"]: i for i, st in enumerate(B_["stations"])}
@@ -107,8 +113,13 @@ def pool_runs(runs_a, runs_b, wa, wb):
             mb = B_["arr"][k].shape[0] if k in B_["arr"] else next(iter(B_["arr"].values())).shape[0]
             pa = A_["arr"][k][:, ia, :].astype(np.float32) if k in A_["arr"] else np.full((ma, len(ia), A_["nwin"]), np.nan, np.float32)
             pb = B_["arr"][k][:, ib, :].astype(np.float32) if k in B_["arr"] else np.full((mb, len(ib), B_["nwin"]), np.nan, np.float32)
+            if k == "t_end":
+                diffs.append(float(np.nanmean(pa) - np.nanmean(pb)))     # różnica średnich T modeli (przed korektą)
+            if shift_a and k in TEMP_FIELDS:
+                pa = pa + np.float32(shift_a)
             arr[k] = np.concatenate([np.tile(pa, (wa, 1, 1)), np.tile(pb, (wb, 1, 1))], axis=0)
         out[d] = dict(arr=arr, stations=[A_["stations"][i] for i in ia], nwin=A_["nwin"])
+    POOL_STATS["t_diff"] = float(np.mean(diffs)) if diffs else float("nan")
     return out
 
 
@@ -145,6 +156,10 @@ def phase_variants(have_rh):
         "G: CPOFP (gdy ważny), inaczej D":
             lambda te, tm, cp, rhe, rhm: np.where(np.isfinite(cp) & (cp >= 0), np.minimum(cp / 100, 1), clipf((3.0 - np.minimum(te, tm)) / 2.0)),
     }
+    v["E1: T zimniejsza z 2 próbek (1@0C->0@2C), progi o 1 C niżej niż D"] = \
+        lambda te, tm, cp, rhe, rhm: clipf((2.0 - np.minimum(te, tm)) / 2.0)
+    v["E2: T zimniejsza z 2 próbek (1@0.5C->0@2.5C), progi o 0.5 C niżej niż D"] = \
+        lambda te, tm, cp, rhe, rhm: clipf((2.5 - np.minimum(te, tm)) / 2.0)
     if have_rh:
         def tw(te, tm, rhe, rhm):
             return np.minimum(wet_bulb(te, np.nan_to_num(rhe, nan=80.0)), wet_bulb(tm, np.nan_to_num(rhm, nan=80.0)))
@@ -745,7 +760,7 @@ def section_scores(runs, obs, store):
     """Oceny, które NIE zależą od wyboru progu alarmu (mniej szumu niż POD/CSI na kilkudziesięciu zdarzeniach):
     CRPS (ciągłe: TMIN, opad doby) i Brier (zdarzenia). Niższe = lepiej. Wektory per stacjodzień trafiają do `store`
     (--scores-out), a compare_models.py porównuje modele PARAMI na tych samych stacjodniach z przedziałem ufności."""
-    say("## 8. Oceny probabilistyczne (CRPS, Brier — niższe = lepiej; wektory zapisane do porównania modeli parami)")
+    say("## 12. Oceny probabilistyczne (CRPS, Brier — niższe = lepiej; wektory zapisane do porównania modeli parami)")
     def cold_extra(A, w):
         return {"v": np.minimum(np.nanmin(A["t_end"][:, :, w], axis=2), np.nanmin(A["t_mid"][:, :, w], axis=2))}
     def precip_extra(A, w):
@@ -801,6 +816,8 @@ def main():
     ap.add_argument("--pool-weights", default="5:3",
                     help="powtórzenia członków A:B przy łączeniu; 5:3 = ~równa waga modeli przy 30 (GEFS) i 51 (IFS) członkach, 1:1 = zwykłe złączenie")
     ap.add_argument("--pool-min-members", type=int, default=50, help="minimalna liczba członków drugiego modelu")
+    ap.add_argument("--pool-shift-a", type=float, default=0.0,
+                    help="stała (°C) dodawana do temperatury członków modelu A (GEFS) przed złączeniem; GEFS jest za ciepły o ok. 1.3 C, więc np. -1.3")
     ap.add_argument("--common-min-members", type=int, default=None,
                     help="minimalna liczba członków w drugim folderze przy --common-with (domyślnie 50 gdy nazwa folderu zawiera 'ifs', inaczej 30) — "
                          "dzięki temu raporty GEFS, IFS i zespołu liczą dokładnie te same daty")
@@ -836,11 +853,13 @@ def main():
         pdir = a.pool_with if os.path.isabs(a.pool_with) else os.path.join(here, a.pool_with)
         runs_b = load_runs(pdir, a.pool_min_members)
         wa, wb = (int(x) for x in a.pool_weights.split(":"))
-        runs = pool_runs(runs, runs_b, wa, wb)
+        runs = pool_runs(runs, runs_b, wa, wb, a.pool_shift_a)
         if not runs:
             sys.exit(f"Brak wspólnych kompletnych przebiegów z {pdir}")
         n_any = next(iter(runs.values()))["arr"]["apcp"].shape[0]
         pool_info = f"zespół POŁĄCZONY: {os.path.basename(hd)} x{wa} + {os.path.basename(pdir)} x{wb} = {n_any} członków (waga modeli ~ {wa}*A : {wb}*B)"
+        pool_info += (f"; korekta temperatury modelu A przed złączeniem: {a.pool_shift_a:+.2f} C; "
+                      f"średnia różnica T końca okna A - B (przed korektą): {POOL_STATS.get('t_diff', float('nan')):+.2f} C")
     global MODEL, NO_WIND
     if a.pool_with:
         MODEL, NO_WIND = "GEFS+IFS", True
