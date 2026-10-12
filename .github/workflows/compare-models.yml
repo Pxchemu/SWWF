@@ -1,0 +1,59 @@
+name: SWWF - porownanie modeli parami (GEFS, IFS ENS, zespol polaczony)
+
+# Czyta pliki reports/scores_*.npz zapisane przez workflow "raport kalibracji" (sekcja 8) i liczy roznice CRPS / Brier
+# parami na tych samych stacjodniach z przedzialem ufnosci. Najpierw uruchom 4 raporty kalibracji (patrz opisy w planie).
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: 'Pliki z reports/ po przecinku, W KOLEJNOSCI: GEFS, IFS, potem zespoly polaczone'
+        required: true
+        default: 'scores_hindcast_v2_gefs_wspolne.npz,scores_hindcast_ifs_ifs_wspolne.npz,scores_hindcast_v2_pool_5_3.npz,scores_hindcast_v2_pool_1_1.npz'
+      labels:
+        description: 'Nazwy w tabeli po przecinku (ta sama kolejnosc)'
+        required: true
+        default: 'GEFS,IFS,pool_5_3,pool_1_1'
+
+permissions:
+  contents: write
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install numpy
+
+      - name: Porownaj modele
+        env:
+          FILES: ${{ inputs.files }}
+          LABELS: ${{ inputs.labels }}
+        run: |
+          IFS=',' read -ra F <<< "$FILES"
+          IFS=',' read -ra L <<< "$LABELS"
+          PATHS=(); for f in "${F[@]}"; do PATHS+=("reports/$(echo "$f" | xargs)"); done
+          LAB=(); for l in "${L[@]}"; do LAB+=("$(echo "$l" | xargs)"); done
+          python compare_models.py --files "${PATHS[@]}" --labels "${LAB[@]}" --out reports/porownanie_modeli.md
+
+      - name: Zapisz wynik do repo
+        run: |
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add reports/
+          git diff --staged --quiet && exit 0
+          git commit -m "Porownanie modeli parami"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
