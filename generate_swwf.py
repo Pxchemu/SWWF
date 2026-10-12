@@ -703,8 +703,19 @@ def main():
     out_json = "swwf_shadow.json" if shadow else "swwf.json"
 
     gefs_run_error = None
+    # SWWF_RUN="RRRR-MM-DD GG" (UTC) wymusza konkretny, już dostępny przebieg (test shadow bez czekania na najnowszy);
+    # produkcja tego nie ustawia
+    forced_run = os.environ.get("SWWF_RUN", "").strip()
+    forced_time = None
+    if forced_run:
+        try:
+            forced_time = datetime.strptime(forced_run, "%Y-%m-%d %H").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise SystemExit(f'SWWF_RUN="{forced_run}": oczekiwany format "RRRR-MM-DD GG" (UTC), np. "2026-10-12 06"')
+        if forced_time.hour % 6:
+            raise SystemExit("SWWF_RUN: godzina musi być 00, 06, 12 albo 18 (przebiegi GEFS/IFS)")
     try:
-        run_time = find_latest_run()
+        run_time = forced_time if forced_time is not None else find_latest_run()
     except Exception as e:
         if ifs_mode == "off":
             raise
