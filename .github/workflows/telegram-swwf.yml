@@ -2,10 +2,17 @@ name: Telegram - depesza poranna SWWF (PL i EN)
 
 on:
   # po kazdym udanym wygenerowaniu prognozy; skrypt sam wysyla depesze tylko RAZ DZIENNIE,
-  # po pierwszej nowej prognozie danego dnia (data wydania wg czasu polskiego)
+  # po pierwszej nowej prognozie danego dnia (data wydania wg czasu polskiego), a w kolejnych
+  # przebiegach tego dnia - krotki ALERT, gdy poziom zagrozenia wzrosl do >= ENHANCED
   workflow_run:
     workflows: ["SWWF - generuj prognoze"]
     types: [completed]
+  # depesza poranna wychodzi nie wczesniej niz o TG_MORNING_FROM_HOUR (czas polski, domyslnie 7:00) - przebieg liczony
+  # ok. 1:30 UTC (po polnocy czasu polskiego) jest gotowy ok. 4 rano, wiec bez tego harmonogramu depesza wyszlaby
+  # od razu albo dopiero po przebiegu 7:30 UTC. Dwa terminy (5:05 i 6:05 UTC) pokrywaja czas letni (7:05) i zimowy (7:05);
+  # skrypt wysyla tylko RAZ dziennie i tylko z prognozy wydanej dzisiaj.
+  schedule:
+    - cron: '5 5,6 * * *'
   # recznie: test lub wymuszenie wysylki
   workflow_dispatch:
     inputs:
@@ -18,6 +25,10 @@ on:
         type: choice
         options: [morning, changes]
         default: morning
+      alert_test:
+        description: 'TEST alertu w ciagu dnia: wysyla alert (oznaczony TEST) dla kazdego hazardu o poziomie >= ENHANCED, bez sprawdzania wzrostu; pomija depesze poranna'
+        type: boolean
+        default: false
       hazard:
         description: 'Tylko tryb changes: hazard na mapie (general_winter_risk, snow_24h_cm, cold_min_t2m_c, snow_squalls, precip_24h_mm)'
         required: false
@@ -33,17 +44,19 @@ concurrency:
 
 jobs:
   send:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}           # odbiorcy depeszy PL
       TG_CHAT_IDS_EN: ${{ secrets.TELEGRAM_CHAT_IDS_EN }}     # odbiorcy depeszy EN (Europa Srodkowa)
+      TG_ALERT_TEST: ${{ inputs.alert_test && '1' || '' }}
       TG_MODE: ${{ inputs.mode }}                             # puste przy automatycznym uruchomieniu = morning
       TG_HAZARD: ${{ inputs.hazard }}
       TG_FORCE: ${{ inputs.force && '1' || '' }}
       TG_LINK: ${{ vars.TELEGRAM_LINK }}
+      TG_MORNING_FROM_HOUR: ${{ vars.TG_MORNING_FROM_HOUR }}   # godzina (czas polski), od ktorej wychodzi depesza poranna; puste = 7
     steps:
       - name: Pobierz zawartosc repo (najnowszy main, z swiezym swwf.json)
         uses: actions/checkout@v4
