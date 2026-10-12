@@ -14,6 +14,10 @@ on:
         description: 'Nazwy w tabeli po przecinku (ta sama kolejnosc)'
         required: true
         default: 'GEFS,IFS,pool_5_3,pool_1_1'
+      pairs:
+        description: 'Opcjonalnie pary do porownania jako numery plikow od 0, np. 3:1,3:2 (puste = domyslny zestaw: kazdy zespol vs 1. i 2. plik oraz 2. vs 1.)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -38,12 +42,14 @@ jobs:
         env:
           FILES: ${{ inputs.files }}
           LABELS: ${{ inputs.labels }}
+          PAIRS: ${{ inputs.pairs }}
         run: |
           IFS=',' read -ra F <<< "$FILES"
           IFS=',' read -ra L <<< "$LABELS"
           PATHS=(); for f in "${F[@]}"; do PATHS+=("reports/$(echo "$f" | xargs)"); done
           LAB=(); for l in "${L[@]}"; do LAB+=("$(echo "$l" | xargs)"); done
-          python compare_models.py --files "${PATHS[@]}" --labels "${LAB[@]}" --out reports/porownanie_modeli.md
+          EXTRA=(); if [ -n "$PAIRS" ]; then EXTRA+=(--pairs "$PAIRS"); fi
+          python compare_models.py --files "${PATHS[@]}" --labels "${LAB[@]}" --out reports/porownanie_modeli.md "${EXTRA[@]}"
 
       - name: Zapisz wynik do repo
         run: |
