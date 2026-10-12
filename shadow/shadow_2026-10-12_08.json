@@ -1,10 +1,246 @@
 {
   "model_run": "2026-10-12T08:00:00+0200",
-  "issued": "2026-10-12T17:58:08+0200",
-  "ensemble": "GEFS",
+  "issued": "2026-10-12T20:05:32+0200",
+  "ensemble": "GEFS+IFS",
   "members_gefs": 30,
-  "members_ifs": 0,
-  "cold_bias_c": -1.0,
-  "ifs": null,
-  "days": []
+  "members_ifs": 50,
+  "cold_bias_c": -0.5,
+  "ifs": {
+    "base": "ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
+    "run": "2026-10-12 06",
+    "messages_total": 1800,
+    "messages_failed": 0,
+    "members_total": 50,
+    "members_complete": 50,
+    "has_control": false,
+    "seconds_wait": 0.8,
+    "seconds_total": 182.0,
+    "mb": 1345.7,
+    "requests": 2282,
+    "google_ok": 1330
+  },
+  "days": [
+    {
+      "label": "Dzień 1",
+      "hazards": {
+        "precip_24h_mm": {
+          "levels_gefs_only": [
+            1045,
+            593,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1018,
+            620,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 61,
+          "cells_down": 34,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.13,
+          "mean_median_diff_pooled_minus_gefs": -0.007
+        },
+        "snow_24h_cm": {
+          "levels_gefs_only": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 0,
+          "cells_down": 0,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.0,
+          "mean_median_diff_pooled_minus_gefs": 0.0
+        },
+        "cold_min_t2m_c": {
+          "levels_gefs_only": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 0,
+          "cells_down": 0,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.508,
+          "mean_median_diff_pooled_minus_gefs": -0.042
+        }
+      }
+    },
+    {
+      "label": "Dzień 2",
+      "hazards": {
+        "precip_24h_mm": {
+          "levels_gefs_only": [
+            401,
+            1237,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            392,
+            1246,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 46,
+          "cells_down": 37,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.256,
+          "mean_median_diff_pooled_minus_gefs": 0.142
+        },
+        "snow_24h_cm": {
+          "levels_gefs_only": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1637,
+            1,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 1,
+          "cells_down": 0,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.0,
+          "mean_median_diff_pooled_minus_gefs": 0.0
+        },
+        "cold_min_t2m_c": {
+          "levels_gefs_only": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 0,
+          "cells_down": 0,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.514,
+          "mean_median_diff_pooled_minus_gefs": 0.262
+        }
+      }
+    },
+    {
+      "label": "Dzień 3",
+      "hazards": {
+        "precip_24h_mm": {
+          "levels_gefs_only": [
+            699,
+            939,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            806,
+            832,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 4,
+          "cells_down": 111,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.21,
+          "mean_median_diff_pooled_minus_gefs": -0.161
+        },
+        "snow_24h_cm": {
+          "levels_gefs_only": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1637,
+            1,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 1,
+          "cells_down": 0,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.0,
+          "mean_median_diff_pooled_minus_gefs": 0.0
+        },
+        "cold_min_t2m_c": {
+          "levels_gefs_only": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "levels_pooled": [
+            1638,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "cells_up": 0,
+          "cells_down": 0,
+          "cells_inside": 1638,
+          "mean_abs_median_diff": 0.498,
+          "mean_median_diff_pooled_minus_gefs": -0.004
+        }
+      }
+    }
+  ]
 }
