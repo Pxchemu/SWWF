@@ -113,13 +113,13 @@ CITY_EN = {"Warszawa": "Warsaw", "Kraków": "Krakow", "Gdańsk": "Gdansk", "Wroc
 TEXTS = {
     "pl": dict(day="Dzień", valid="ważne", tz="czas polski", wd=WEEKDAYS, top="Najwyższy poziom",
                none="Brak obszarów zagrożenia", levels=LEVEL_DESC,
-               foot1="Własna analiza zespołu GEFS (30 członków) · przebieg {run}, wydano {issued}",
+               foot1="Własna analiza zespołu {src} · przebieg {run}, wydano {issued}{attr}",
                foot2="Poziom wynika z macierzy: prawdopodobieństwo × intensywność. To nie jest oficjalne ostrzeżenie IMGW.",
                titles=None),
     "en": dict(day="Day", valid="valid", tz="Central European time", wd=WEEKDAYS_EN, top="Highest level",
                none="No hazard areas",
                levels=["no hazard", "low", "elevated", "significant", "high", "extreme"],
-               foot1="Own analysis of a 30-member GEFS ensemble · run {run}, issued {issued}",
+               foot1="Own analysis of the {src} ensemble · run {run}, issued {issued}{attr}",
                foot2="Level comes from a matrix: probability × intensity. This is not an official warning.",
                titles={"general_winter_risk": "General winter risk", "snow_24h_cm": "Snow",
                        "cold_min_t2m_c": "Cold", "snow_squalls": "Snow squalls",
@@ -130,6 +130,10 @@ TEXTS = {
 # ----------------------------------------------------------------------------- pomocnicze
 def parse_iso(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
+
+
+def _ens_label(swwf: dict) -> str:
+    return swwf.get("ensemble") or "GEFS"
 
 
 def fmt_day_range(a: str, b: str, lang: str = "pl") -> str:
@@ -396,8 +400,17 @@ def render_map(day: dict, hazard_key: str, swwf: dict, countries, admin1, path: 
     # ---- stopka
     run = parse_iso(swwf["model_run"])
     issued = parse_iso(swwf["issued"])
+    import swwf_airmet as AM
+    kind = AM.ens_kind(swwf)
+    n_mem = AM.ens_members(swwf)
+    src = {"GEFS+IFS": f"GEFS + IFS ENS ({n_mem} " + ("członków)" if lang == "pl" else "members)"),
+           "IFS": f"IFS ENS ({n_mem} " + ("członków)" if lang == "pl" else "members)")}.get(
+        kind, f"GEFS ({n_mem} " + ("członków)" if lang == "pl" else "members)"))
+    attr = ("" if "IFS" not in kind else
+            (" · Zawiera zmodyfikowane dane ECMWF (CC BY 4.0)" if lang == "pl"
+             else " · Contains modified ECMWF data (CC BY 4.0)"))
     fig.text(fx(M), fy(0.36),
-             T["foot1"].format(run=f"{run:%d.%m %H:%M}", issued=f"{issued:%d.%m %H:%M}") + "\n" + T["foot2"],
+             T["foot1"].format(run=f"{run:%d.%m %H:%M}", issued=f"{issued:%d.%m %H:%M}", src=src, attr=attr) + "\n" + T["foot2"],
              fontsize=7.4, color=th["foot"], va="center", linespacing=1.5)
     fig.text(FW and fx(FW - M), fy(0.36), "MeteoPanel", fontsize=10.5, fontweight="bold", family=head,
              ha="right", va="center", color=th["sub"])
@@ -411,7 +424,7 @@ def build_text(swwf: dict, hazard_key: str) -> str:
     run = parse_iso(swwf["model_run"])
     issued = parse_iso(swwf["issued"])
     lines = [f"❄️ SWWF — nowa prognoza",
-             f"Przebieg GEFS: {WEEKDAYS[run.weekday()]} {run:%d.%m %H:%M} · wydano {issued:%H:%M}",
+             f"Przebieg {_ens_label(swwf)}: {WEEKDAYS[run.weekday()]} {run:%d.%m %H:%M} · wydano {issued:%H:%M}",
              f"Na mapach: {HAZARD_TITLES.get(hazard_key, hazard_key)}", ""]
     keys = list(SIGNAL_HAZARDS)
     if hazard_key == "precip_24h_mm":
@@ -427,7 +440,10 @@ def build_text(swwf: dict, hazard_key: str) -> str:
         if not any_line:
             lines.append("  ⬜ brak zagrożeń")
         lines.append("")
-    lines.append("Własna analiza zespołu GEFS, nie oficjalne ostrzeżenie IMGW.")
+    lines.append("Własna analiza zespołu " + _ens_label(swwf) + ", nie oficjalne ostrzeżenie IMGW.")
+    import swwf_airmet as AM
+    if AM.ecmwf_note(swwf, "pl"):
+        lines.append(AM.ecmwf_note(swwf, "pl"))
     link = os.environ.get("TG_LINK", "").strip()
     if link:
         lines.append(link)
@@ -620,7 +636,7 @@ def send_maps(token, chat_id, image_paths, caption):
     return ok, err
 
 
-def main_morning(args) -> int:
+def main_morning(args):
     """Depesza poranna: raz dziennie, po pierwszej nowej prognozie danego dnia (data wydania wg czasu polskiego).
 
     Tekst: PL do TG_CHAT_IDS, EN do TG_CHAT_IDS_EN. Mapy tylko dla dób/hazardów, na których coś jest."""
@@ -638,6 +654,24 @@ def main_morning(args) -> int:
         swwf = json.load(f)
 
     issued_date = parse_iso(swwf["issued"]).date().isoformat()
+
+    # Depesza poranna nie wychodzi wcześniej niż o TG_MORNING_FROM_HOUR (czas polski, domyślnie 7) i tylko
+    # z prognozy wydanej DZISIAJ — przebieg z ok. 4 rano jest gotowy za wcześnie, a stara prognoza (np. po awarii
+    # generatora) nie ma być wysłana jako poranna. Test ręczny (force) i --dry-run to omijają.
+    if not force and not args.dry_run:
+        from zoneinfo import ZoneInfo
+        try:
+            from_hour = int(os.environ.get("TG_MORNING_FROM_HOUR", "").strip() or "7")
+        except ValueError:
+            from_hour = 7
+        now_pl = datetime.now(ZoneInfo("Europe/Warsaw"))
+        if issued_date != now_pl.date().isoformat():
+            print(f"Depesza poranna: najnowsza prognoza wydana {issued_date}, dziś {now_pl.date().isoformat()} — czekam na dzisiejszą.")
+            return 0, set()
+        if now_pl.hour < from_hour:
+            print(f"Depesza poranna: jest {now_pl:%H:%M} (czas polski), wysyłka od {from_hour}:00 — czekam.")
+            return 0, set()
+
     state = read_state()
     ms = state.get("morning") or {}
     if ms.get("date") != issued_date:
@@ -655,10 +689,10 @@ def main_morning(args) -> int:
             print(f"Brak odbiorców {l.upper()} (sekret TG_CHAT_IDS{'_EN' if l == 'en' else ''}) — pomijam.")
     if not langs:
         print("Nic do wysłania (już wysłano dziś albo brak odbiorców).")
-        return 0
+        return 0, set()
     if not args.dry_run and not token:
         print("Brak sekretu TG_TOKEN.")
-        return 1
+        return 1, set()
 
     texts = {}
     if "pl" in langs:
@@ -682,9 +716,10 @@ def main_morning(args) -> int:
     if args.dry_run:
         for l in langs:
             print(f"\n===== {l.upper()} =====\n{texts[l]}")
-        return 0
+        return 0, set()
 
     all_ok = True
+    sent_now = set()
     for l in langs:
         ok_lang = True
         for n, chat in enumerate(chats[l], 1):
@@ -698,10 +733,94 @@ def main_morning(args) -> int:
             print(f"{l.upper()} odbiorca {n}/{len(chats[l])}: {'wysłano' if ok else 'BŁĄD ' + err}")
             ok_lang = ok_lang and ok
         ms[l] = ms[l] or ok_lang
+        if ok_lang:
+            sent_now.add(l)
         all_ok = all_ok and ok_lang
     state["morning"] = ms
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f)
+    return (0 if all_ok else 1), sent_now
+
+
+# ----------------------------------------------------------------------------- alert w ciągu dnia
+def main_alerts(args, skip_langs=frozenset()) -> int:
+    """Krótki alert, gdy w KOLEJNYM przebiegu najwyższy poziom hazardu na danym obszarze wzrósł
+    (blok trend z generatora) do co najmniej TG_ALERT_MIN_LEVEL (domyślnie 2 = ENHANCED), na co najmniej
+    TG_ALERT_MIN_CELLS polach siatki (domyślnie 2). PL: obszar = Polska; EN: Niemcy+Polska+Czechy+Słowacja.
+    Języki, którym w tym uruchomieniu poszła depesza poranna, są pomijane. TG_ALERT_TEST=1: test ręczny
+    — każdy hazard o poziomie >= minimum traktowany jak wzrost (bez sprawdzania poprzedniego przebiegu)."""
+    import swwf_airmet as AM
+    test = os.environ.get("TG_ALERT_TEST", "").strip() in ("1", "true", "True")
+    try:
+        min_level = int(os.environ.get("TG_ALERT_MIN_LEVEL", "").strip() or "2")
+        min_cells = int(os.environ.get("TG_ALERT_MIN_CELLS", "").strip() or "2")
+    except ValueError:
+        min_level, min_cells = 2, 2
+    keys = [k.strip() for k in os.environ.get("TG_ALERT_HAZARDS", "").split(",") if k.strip()] or None
+    with open(args.swwf, encoding="utf-8") as f:
+        swwf = json.load(f)
+
+    token = os.environ.get("TG_TOKEN", "").strip()
+    chats = {
+        "pl": [c.strip() for c in os.environ.get("TG_CHAT_IDS", "").split(",") if c.strip()],
+        "en": [c.strip() for c in os.environ.get("TG_CHAT_IDS_EN", "").split(",") if c.strip()],
+    }
+    state = read_state()
+    al = state.get("alert") or {}
+    if al.get("model_run") != swwf["model_run"]:
+        al = {"model_run": swwf["model_run"], "pl": False, "en": False}
+    langs = [l for l in ("pl", "en") if l not in skip_langs and (args.dry_run or chats[l]) and (test or not al[l])]
+    if not langs:
+        print("Alerty: nic do sprawdzenia (depesza poranna poszła w tym uruchomieniu, alert dla tego przebiegu już wysłany albo brak odbiorców).")
+        return 0
+
+    units = {}
+    if "pl" in langs:
+        units["pl"] = AM.load_voivodeships()
+    if "en" in langs:
+        units["en"] = AM.load_countries()
+    all_ok, changed = True, False
+    countries_map = admin1 = None
+    for l in langs:
+        cells = AM.cells_by_voivodeship(swwf["grid"], units[l])
+        alerts = AM.detect_alerts(swwf, cells, keys, min_level, min_cells, test_all=test)
+        if not alerts:
+            print(f"Alert {l.upper()}: brak wzrostu do poziomu >= {swwf['level_names'][min_level]}.")
+            continue
+        print(f"Alert {l.upper()}: " + ", ".join(f"Dzień {d + 1}:{k} {swwf['level_names'][b]}→{swwf['level_names'][n]}"
+                                               for d, k, b, n, _ in alerts))
+        text = (AM.build_alert_pl(swwf, units[l], alerts, cells, test) if l == "pl"
+                else AM.build_alert_en(swwf, units[l], alerts, cells, test))
+        paths = []
+        if countries_map is None:
+            countries_map, admin1 = load_countries(), load_admin1()
+        os.makedirs(args.out_dir, exist_ok=True)
+        theme = os.environ.get("TG_THEME", "").strip() or "dark"
+        for d, k, _, _, _ in alerts[:6]:
+            path = os.path.join(args.out_dir, f"alert_{l}_dzien{d + 1}_{k}.png")
+            render_map(swwf["days"][d], k, swwf, countries_map, admin1, path, theme, lang=l)
+            paths.append(path)
+        if args.dry_run:
+            print(f"\n===== ALERT {l.upper()} =====\n{text}")
+            continue
+        ok_lang = True
+        for n, chat in enumerate(chats[l], 1):
+            ok, err = True, ""
+            for part in split_text(text):
+                o, e = send_text(token, chat, part)
+                ok, err = ok and o, err or e
+            if ok and paths:
+                o, e = send_maps(token, chat, paths, "")
+                ok, err = ok and o, err or e
+            print(f"Alert {l.upper()} odbiorca {n}/{len(chats[l])}: {'wysłano' if ok else 'BŁĄD ' + err}")
+            ok_lang = ok_lang and ok
+        al[l] = al[l] or ok_lang
+        changed = True
+        all_ok = all_ok and ok_lang
+    if changed and not test:
+        state["alert"] = al
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
     return 0 if all_ok else 1
 
 
@@ -712,7 +831,13 @@ def main() -> int:
     ap.add_argument("--swwf", default=SWWF_JSON)
     args = ap.parse_args()
     mode = os.environ.get("TG_MODE", "").strip().lower() or "morning"
-    return main_changes(args) if mode == "changes" else main_morning(args)
+    if mode == "changes":
+        return main_changes(args)
+    if os.environ.get("TG_ALERT_TEST", "").strip() in ("1", "true", "True"):
+        return main_alerts(args)                      # ręczny test samego alertu
+    rc, sent = main_morning(args)
+    rc2 = main_alerts(args, skip_langs=sent)
+    return rc or rc2
 
 
 if __name__ == "__main__":
