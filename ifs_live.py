@@ -93,9 +93,11 @@ def decode_region(raw, region):
         ni = int(eccodes.codes_get(gid, "Ni"))
         nj = int(eccodes.codes_get(gid, "Nj"))
         la1 = float(eccodes.codes_get(gid, "latitudeOfFirstGridPointInDegrees"))
-        la2 = float(eccodes.codes_get(gid, "latitudeOfLastGridPointInDegrees"))
         lo1 = float(eccodes.codes_get(gid, "longitudeOfFirstGridPointInDegrees"))
-        lo2 = float(eccodes.codes_get(gid, "longitudeOfLastGridPointInDegrees"))
+        dlat = float(eccodes.codes_get(gid, "jDirectionIncrementInDegrees"))
+        dlon = float(eccodes.codes_get(gid, "iDirectionIncrementInDegrees"))
+        j_pos = int(eccodes.codes_get(gid, "jScansPositively")) == 1
+        i_neg = int(eccodes.codes_get(gid, "iScansNegatively")) == 1
         if int(eccodes.codes_get(gid, "jPointsAreConsecutive")) != 0:
             raise ValueError("nieobsługiwany układ siatki (jPointsAreConsecutive=1)")
         try:
@@ -107,8 +109,13 @@ def decode_region(raw, region):
         eccodes.codes_release(gid)
     if values.size != ni * nj:
         raise ValueError(f"liczba wartości {values.size} != {ni}x{nj}")
-    lats = np.linspace(la1, la2, nj)                 # kolejność skanowania (zwykle od północy)
-    lons = np.linspace(lo1, lo2, ni) % 360.0
+    # Współrzędne z kroku siatki, NIE z pierwszego/ostatniego punktu: pliki ECMWF zaczynają się od długości 180°
+    # i "zawijają" (180 ... 359,75, 0 ... 179,75), więc ostatni punkt (179,75) < pierwszy (180) i linspace(pierwszy,
+    # ostatni) dawał zdegenerowane długości (wszystkie ~180°) -> pusty wycinek.
+    lats = la1 + (dlat if j_pos else -dlat) * np.arange(nj)
+    lons = (lo1 + (-dlon if i_neg else dlon) * np.arange(ni)) % 360.0
+    if np.abs(lats).max() > 90.0 + 1e-6 or abs(dlon * ni - 360.0) > 1e-6 and abs(dlon * (ni - 1) - 360.0) > 1e-6:
+        raise ValueError(f"nietypowa siatka: lat {lats.min()}..{lats.max()}, {ni} x {dlon}°")
     field = values.reshape(nj, ni).astype(np.float32)
     field[(np.abs(field - missing) < 1e-6) | ~np.isfinite(field) | (np.abs(field) > 1e8)] = np.nan
     if lats[0] < lats[-1]:                           # ujednolicenie: lat malejące
@@ -192,10 +199,18 @@ def load_ifs(run, region, wait_minutes=45, log=print):
                 store[(p, m, s)] = field
         return failed
 
+    def retryable(item):
+        why = bad.get(item[:3], "")
+        return not why.startswith("GRIB: ") or why.startswith("GRIB: zły")      # błąd dekodowania nie minie po ponowieniu
+
     pending = todo
     for rnd in range(1 + RETRY_ROUNDS):
         pending = run_pass(pending)
         if not pending:
+            break
+        if not any(retryable(it) for it in pending):
+            log(f"IFS: {len(pending)} wiadomości z błędem dekodowania (bez ponawiania): "
+                f"{bad.get(pending[0][:3], '?')}")
             break
         log(f"IFS: runda {rnd + 1}: {len(pending)} z {total} wiadomości nieudanych"
             f"{' — ponawiam' if rnd < RETRY_ROUNDS else ''}")
@@ -212,7 +227,7 @@ def load_ifs(run, region, wait_minutes=45, log=print):
                           "tp": {s: (a * 1000.0).astype(np.float32) for s, a in tp.items()}}
     stats = {"base": base.split("/")[2], "run": run.strftime("%Y-%m-%d %H"),
              "messages_total": total, "messages_failed": len(pending),
-             "members_total": len(all_members), "members_complete": len(members),
+             "members_total": len(all_members), "members_complete": len(members), "has_control": 0 in all_members,
              "seconds_wait": round(t_avail, 1), "seconds_total": round(time.time() - t0, 1),
              "mb": round((A.STATS["bytes"] - b0) / 1e6, 1), "requests": A.STATS["requests"] - r0,
              "google_ok": A.STATS["google_ok"] - g0}
