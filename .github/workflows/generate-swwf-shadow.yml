@@ -1,0 +1,74 @@
+name: SWWF - shadow IFS (test zespolu, bez wplywu na produkcje)
+
+# Liczy ten sam przebieg co produkcja, ale z zespolem GEFS + IFS ENS, i zapisuje WYLACZNIE swwf_shadow.json oraz
+# shadow_report.json (porownanie z samym GEFS na polach siatki w krajach SWWF: poziomy, zmiany komorek, roznica mediany,
+# czas i ilosc pobranych danych IFS). swwf.json, archive/ i Telegram NIE sa ruszane (inna nazwa workflow niz
+# "SWWF - generuj prognoze", wiec Telegram sie nie uruchomi).
+# Uruchamiaj recznie PO 07:30 UTC (IFS 00z jest dostepny od ok. 06:55 UTC), 3-5 razy, o roznych porach (tez 06/12/18z).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ifs_wait:
+        description: 'Ile minut czekac na kompletny przebieg IFS'
+        required: false
+        default: '60'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: swwf-shadow
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Pobierz zawartosc repo
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install herbie-data matplotlib geojsoncontour scipy shapely eccodes requests
+
+      - name: Wygeneruj zespol w trybie shadow
+        env:
+          SWWF_WAIT_MINUTES: "90"
+          SWWF_IFS: shadow
+          SWWF_IFS_WAIT_MINUTES: ${{ inputs.ifs_wait }}
+          IFS_WORKERS: "8"
+        run: |
+          START=$(date +%s)
+          python generate_swwf.py
+          echo "Czas calkowity: $(( $(date +%s) - START )) s"
+
+      - name: Zapisz wynik jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: swwf-shadow
+          path: |
+            swwf_shadow.json
+            shadow_report.json
+          retention-days: 7
+
+      - name: Zapisz raport do repo (tylko maly raport, bez swwf.json)
+        run: |
+          mkdir -p shadow
+          STAMP=$(python -c "import json; print(json.load(open('shadow_report.json'))['model_run'][:13].replace('T', '_'))")
+          cp shadow_report.json "shadow/shadow_${STAMP}.json"
+          git config user.name "SWWF Bot"
+          git config user.email "actions@github.com"
+          git add shadow/
+          git diff --staged --quiet && exit 0
+          git commit -m "Raport shadow IFS ${STAMP}"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
