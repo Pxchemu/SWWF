@@ -13,6 +13,12 @@ on:
     # Przesuniete o 2,5 h wzgledem dawnych 5/11/17/23 UTC, bo IFS ENS (ECMWF) udostepnia kroki 0-72 h
     # przebiegu 00/06/12/18Z dopiero ok. 6:40-6:55 / 12:40 / 18:40 / 0:40 UTC (GEFS jest gotowy wczesniej).
     - cron: '30 1,7,13,19 * * *'
+    # ZAPASOWE starty: GitHub potrafi pominac zaplanowany przebieg (13.10: nie ruszyly 7:30 i 13:30 UTC,
+    # bez sladu na liscie Actions). Kolejne podejscia sa nieszkodliwe - krok "Czy ten przebieg juz jest?"
+    # konczy je od razu, gdy archive/ ma juz przebieg, ktory powinien byc gotowy. Kazdy zapasowy start
+    # wypada w tym samym cyklu co glowny (okno: start - 4 h lezy w tej samej szostce godzin).
+    - cron: '50 2,8,14,20 * * *'
+    - cron: '5 3,9,15,21 * * *'
 
 # domyslny token GitHub Actions ma prawo tylko ODCZYTU repo (widziales to w logu:
 # "Contents: read") - zeby workflow mogl sam zapisac wynik z powrotem, trzeba
@@ -33,15 +39,35 @@ jobs:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
 
+      # Zapasowe starty z crona: jesli przebieg, ktory powinien byc juz gotowy (najnowsza godzina
+      # synoptyczna sprzed >= 4 h - ta sama regula co find_latest_run), jest w archive/, nic nie robimy.
+      # Reczne uruchomienie (workflow_dispatch) zawsze liczy od nowa.
+      - name: Czy ten przebieg juz jest?
+        id: check
+        run: |
+          now=$(date -u +%s)
+          cyc=$(( (now - 14400) / 21600 * 21600 ))
+          f="archive/$(date -u -d @$cyc +%Y-%m-%d_%Hz).json"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "$f" ]; then
+            echo "Przebieg $f juz istnieje - zapasowy start nie jest potrzebny."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Brak $f (albo start reczny) - generuje."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Zainstaluj Pythona
+        if: steps.check.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Zainstaluj biblioteki
+        if: steps.check.outputs.skip != 'true'
         run: pip install herbie-data matplotlib geojsoncontour scipy shapely eccodes requests
 
       - name: Wygeneruj swwf.json
+        if: steps.check.outputs.skip != 'true'
         env:
           # przebieg GEFS bywa jeszcze niekompletny na AWS (fxx=72) - zamiast cofac sie na starszy
           # (i tracic archiwum 00z potrzebne do weryfikacji opadu) czekamy do 90 min
@@ -55,6 +81,7 @@ jobs:
         run: python generate_swwf.py
 
       - name: Zapisz wynik z powrotem do repo
+        if: steps.check.outputs.skip != 'true'
         run: |
           git config user.name "SWWF Bot"
           git config user.email "actions@github.com"
