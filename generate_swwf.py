@@ -612,9 +612,19 @@ def compute_trend_blocks(days_out, run_time, prev):
             cur_h, old_h = day["hazards"].get(key), prev_hazards.get(key)
             if not cur_h or not old_h or "level_grid" not in old_h:
                 continue
-            cur = np.array(cur_h["level_grid"], dtype=int)
-            old = np.array(old_h["level_grid"], dtype=int)
-            if cur.shape != old.shape:
+            # trend to dodatek: nietypowe/uszkodzone poprzednie wydanie (np. nieregularna siatka) nie moze
+            # przerwac calego przebiegu - taki hazard pomijamy i piszemy w logu, co jest nie tak
+            try:
+                cur = np.array(cur_h["level_grid"], dtype=int)
+                old = np.array(old_h["level_grid"], dtype=int)
+            except (ValueError, TypeError) as e:
+                og = old_h["level_grid"]
+                row_lens = sorted({len(r) if isinstance(r, list) else -1 for r in og}) if isinstance(og, list) else "?"
+                print(f"UWAGA trend: pomijam {key}, dzien {d + 1} (poprzednie wydanie: nieregularna siatka — "
+                      f"{len(og) if hasattr(og, '__len__') else '?'} wierszy, dlugosci wierszy {row_lens}; {type(e).__name__})",
+                      flush=True)
+                continue
+            if cur.shape != old.shape or cur.ndim != 2:
                 continue
             diff = cur - old
             active = (cur > 0) | (old > 0)
@@ -1001,7 +1011,11 @@ def main():
     if previous_result is not None and previous_result.get("ensemble", "GEFS") != ensemble:
         print(f"Trend: poprzednie wydanie liczone z innego zespołu ({previous_result.get('ensemble', 'GEFS')} → {ensemble}) — pomijam")
         trend_prev = None
-    trend_blocks = compute_trend_blocks(days_out, run_time, trend_prev)
+    try:
+        trend_blocks = compute_trend_blocks(days_out, run_time, trend_prev)
+    except Exception as e:   # trend nie moze zablokowac zapisu prognozy
+        print(f"UWAGA trend: pominiety w calosci ({type(e).__name__}: {e})", flush=True)
+        trend_blocks = [dict() for _ in days_out]
     for d_idx, day in enumerate(days_out):
         for key, block in trend_blocks[d_idx].items():
             day["hazards"][key]["trend"] = block
