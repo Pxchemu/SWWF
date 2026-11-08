@@ -118,7 +118,12 @@ MEMBERS = list(range(1, 31))
 # swwf_shadow.json + shadow_report.json, NIE rusza swwf.json ani archive/) | "on" (produkcja: GEFS+IFS, a przy braku
 # IFS — samo GEFS; przy braku GEFS — sam IFS).
 IFS_MODE = os.environ.get("SWWF_IFS", "off").strip().lower()
-IFS_WAIT_MINUTES = int(os.environ.get("SWWF_IFS_WAIT_MINUTES", "45") or 0)   # tyle czekamy na kompletny przebieg IFS
+IFS_WAIT_MINUTES = int(os.environ.get("SWWF_IFS_WAIT_MINUTES", "45") or 0)   # tyle czekamy na kompletny przebieg IFS (minimum, od startu)
+# ECMWF udostępnia kroki 0-72 h przebiegu ok. 7 h 40 min po jego starcie (obserwacje: 12z -> 19:41 UTC 12.10 i 7.11), a nie
+# o 6:40 jak w dokumentacji. Samo "120 min od startu" nie wystarcza, gdy job startuje wcześnie (np. ręcznie zaraz po GEFS,
+# ~4 h 40 min po przebiegu): czekanie liczymy więc także do (godzina przebiegu + IFS_PUBLISH_HOURS), z górnym limitem.
+IFS_PUBLISH_HOURS = float(os.environ.get("SWWF_IFS_PUBLISH_HOURS", "9") or 9)
+IFS_MAX_WAIT_MINUTES = int(os.environ.get("SWWF_IFS_MAX_WAIT_MINUTES", "300") or 300)
 GEFS_MIN_MEMBERS_OK = 10      # poniżej tylu udanych członków GEFS (a przy działającym IFS) liczymy sam IFS
 NOMINAL_MEMBERS = {"GEFS": 30, "IFS": 51}
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
@@ -691,9 +696,16 @@ def stack_members(arrs, lat_ref, lon_ref):
                         coords={"latitude": lat_ref, "longitude": lon_ref})
 
 
+def ifs_wait_minutes(run_time):
+    """Ile minut czekać na IFS: co najmniej SWWF_IFS_WAIT_MINUTES od teraz, ale też do (przebieg + SWWF_IFS_PUBLISH_HOURS),
+    nie dłużej niż SWWF_IFS_MAX_WAIT_MINUTES."""
+    until_publish = (run_time + timedelta(hours=IFS_PUBLISH_HOURS) - datetime.now(timezone.utc)).total_seconds() / 60
+    return int(min(max(IFS_WAIT_MINUTES, until_publish), max(IFS_MAX_WAIT_MINUTES, IFS_WAIT_MINUTES)))
+
+
 def latest_ifs_run_guess():
-    """Gdy GEFS jest zupełnie niedostępny: najnowszy przebieg IFS, który powinien już być kompletny (~7 h po starcie)."""
-    t = datetime.now(timezone.utc) - timedelta(hours=7)
+    """Gdy GEFS jest zupełnie niedostępny: najnowszy przebieg IFS, który powinien już być kompletny (~8 h po starcie)."""
+    t = datetime.now(timezone.utc) - timedelta(hours=8)
     t = t.replace(minute=0, second=0, microsecond=0)
     return t - timedelta(hours=t.hour % 6)
 
@@ -741,8 +753,11 @@ def main():
         try:
             import ifs_live
             ifs_executor = ThreadPoolExecutor(max_workers=1)
+            ifs_wait = ifs_wait_minutes(run_time)
+            print(f"IFS: czekam na przebieg najwyżej {ifs_wait} min (do {run_time + timedelta(hours=IFS_PUBLISH_HOURS):%H:%M} UTC "
+                  f"lub min. {IFS_WAIT_MINUTES} min od teraz)", flush=True)
             ifs_future = ifs_executor.submit(ifs_live.load_ifs, run_time,
-                                             (LAT_MIN, LAT_MAX, LON_MIN_360, LON_MAX_360), IFS_WAIT_MINUTES)
+                                             (LAT_MIN, LAT_MAX, LON_MIN_360, LON_MAX_360), ifs_wait)
         except Exception as e:
             print(f"IFS: nie można uruchomić pobierania ({type(e).__name__}: {e}) — tylko GEFS")
 
