@@ -71,8 +71,9 @@ jobs:
       - name: Zainstaluj biblioteki
         run: pip install matplotlib shapely requests
 
-      - name: Zainstaluj czcionki (Inter, Archivo - jak na stronie; tylko na czas dzialania, nie trafia do repo)
-        run: npm install --no-save --no-package-lock --silent @expo-google-fonts/inter @expo-google-fonts/archivo || echo "Bez czcionek - uzyje domyslnej"
+      # czcionka IBM Plex Sans (jak na stronie) pochodzi z folderu fonts/ w repo - nic nie trzeba instalowac
+      - name: Sprawdz czcionki (fonts/ w repo)
+        run: ls fonts/IBMPlexSans-*.ttf || echo "UWAGA - brak fonts/IBMPlexSans-*.ttf, grafiki beda w domyslnej czcionce"
 
       - name: Zbuduj depesze, narysuj mapy (tylko z zagrozeniem) i wyslij
         run: python swwf_telegram.py --out-dir swwf_maps
