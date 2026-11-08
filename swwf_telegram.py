@@ -207,31 +207,39 @@ def load_admin1():
 
 
 # ----------------------------------------------------------------------------- czcionki i logo
+_FONTS = None
+
+
 def setup_fonts():
-    """Inter (tekst) + Archivo (naglowki) — te same, co na stronie. Szuka plikow TTF z npm
-    (@expo-google-fonts/*, instalowane w workflow) albo w TG_FONT_DIR; bez nich zostaje DejaVu."""
+    """IBM Plex Sans (tekst i naglowki) - ta sama czcionka co na stronie. Pliki TTF leza w repo w folderze fonts/
+    (IBMPlexSans-Regular/Medium/SemiBold/Bold.ttf, licencja SIL OFL). Szuka ich w TG_FONT_DIR, obok skryptu i w
+    ./fonts; bez nich zostaje domyslny DejaVu Sans (grafika nadal sie rysuje, tylko inna czcionka)."""
+    global _FONTS
+    if _FONTS is not None:
+        return _FONTS
     import glob
     from matplotlib import font_manager as fm
-    roots = [os.environ.get("TG_FONT_DIR", "").strip(), "node_modules", "fonts/node_modules"]
-    found = 0
+    here = os.path.dirname(os.path.abspath(__file__))
+    roots = [os.environ.get("TG_FONT_DIR", "").strip(), os.path.join(here, "fonts"), "fonts"]
+    seen, found = set(), 0
     for root in [r for r in roots if r]:
-        for fam in ("inter", "archivo"):
-            for f in glob.glob(os.path.join(root, "**", "@expo-google-fonts", fam, "*", "*.ttf"), recursive=True) + \
-                     glob.glob(os.path.join(root, "@expo-google-fonts", fam, "*", "*.ttf")) + \
-                     glob.glob(os.path.join(root, "*.ttf")):
-                base = os.path.basename(f)
-                if any(x in base for x in ("Italic", "Condensed", "Expanded", "Narrow")):
-                    continue
-                try:
-                    fm.fontManager.addfont(f)
-                    found += 1
-                except Exception:
-                    pass
+        for f in sorted(glob.glob(os.path.join(root, "IBMPlexSans-*.ttf"))):
+            real = os.path.realpath(f)
+            if real in seen:
+                continue
+            seen.add(real)
+            try:
+                fm.fontManager.addfont(f)
+                found += 1
+            except Exception:
+                pass
     names = {f.name for f in fm.fontManager.ttflist}
-    body = "Inter" if "Inter" in names else "DejaVu Sans"
-    head = "Archivo" if "Archivo" in names else body
-    print(f"Czcionki: tekst={body}, nagłówki={head} (plików: {found})")
-    return body, head
+    body = "IBM Plex Sans" if "IBM Plex Sans" in names else "DejaVu Sans"
+    if body == "DejaVu Sans":
+        print("UWAGA: brak plikow fonts/IBMPlexSans-*.ttf - uzywam DejaVu Sans.")
+    print(f"Czcionki: {body} (plików: {found})")
+    _FONTS = (body, body)
+    return _FONTS
 
 
 def rounded_rect_xy(x0, y0, x1, y1, rx, ry, n=10):
@@ -586,7 +594,10 @@ def main_changes(args) -> int:
 
 
 # ----------------------------------------------------------------------------- tryb poranny
-MORNING_HAZARDS = ["general_winter_risk", "precip_24h_mm"]   # mapy: zimowe razem + opad
+MORNING_HAZARDS_DEFAULT = ["general_winter_risk", "snow_24h_cm", "cold_min_t2m_c", "precip_24h_mm"]
+# mapy: ogolne ryzyko zimowe, osobno snieg i mroz, osobno opad; TG_MAP_HAZARDS (lista kluczy po przecinku) zmienia zestaw
+MORNING_HAZARDS = [k.strip() for k in os.environ.get("TG_MAP_HAZARDS", "").split(",") if k.strip()] \
+    or MORNING_HAZARDS_DEFAULT
 MORNING_CAPTION = {"pl": "🗺 Mapy SWWF — dni, w których prognozowane jest zagrożenie",
                    "en": "🗺 SWWF maps — days with a forecast hazard"}
 
