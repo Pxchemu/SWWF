@@ -652,6 +652,63 @@ def make_set(swwf, hkey, geo_bg, named, admin1, out_dir, logo, min_level, guides
     return sub, paths, cap
 
 
+def tiktok_chats():
+    """Odbiorcy zestawow TikTok: sekret TIKTOK_CHAT_IDS (np. tylko wlasciciel); gdy go nie ma - PIERWSZY numer z
+    TG_CHAT_IDS (zwykle wlasciciel). Zestawy sa robocze (do wrzucenia na TikTok), wiec nie ida do wszystkich znajomych."""
+    own = [c.strip() for c in os.environ.get("TIKTOK_CHAT_IDS", "").split(",") if c.strip()]
+    if own:
+        return own
+    allc = [c.strip() for c in os.environ.get("TG_CHAT_IDS", "").split(",") if c.strip()]
+    return allc[:1]
+
+
+def send_documents(token, chat_id, paths, caption):
+    """Slajdy jako DOKUMENTY (oryginalne PNG 1080x1920 - Telegram nie zmniejsza ich jak zdjec), album po <= 10."""
+    ok, err = True, ""
+    for n in range(0, len(paths), 10):
+        chunk = paths[n:n + 10]
+        media, files = [], {}
+        for i, pth in enumerate(chunk):
+            item = {"type": "document", "media": f"attach://d{i}"}
+            if i == len(chunk) - 1 and n == 0 and caption:   # podpis na ostatnim: album sie zwija z podpisem pod spodem
+                item["caption"] = caption
+            media.append(item)
+            files[f"d{i}"] = open(pth, "rb")
+        try:
+            if len(chunk) == 1:
+                o, e = st.tg_call(token, "sendDocument", {"chat_id": chat_id, "caption": caption},
+                                  {"document": files["d0"]})
+            else:
+                o, e = st.tg_call(token, "sendMediaGroup", {"chat_id": chat_id, "media": json.dumps(media)}, files)
+        finally:
+            for fh in files.values():
+                fh.close()
+        ok, err = ok and o, err or e
+    return ok, err
+
+
+def send_results(results, nothing_msg):
+    token = os.environ.get("TG_TOKEN", "").strip()
+    chats = tiktok_chats()
+    if not token or not chats:
+        print("Brak sekretu TG_TOKEN albo odbiorców (TIKTOK_CHAT_IDS / TG_CHAT_IDS) - nic nie wysyłam.")
+        return 1
+    all_ok = True
+    for chat in chats:
+        if not results:
+            o, e = st.send_text(token, chat, nothing_msg)
+            all_ok = all_ok and o
+            print(f"Wiadomość: {'wysłano' if o else 'BŁĄD ' + e}")
+            continue
+        for hkey, (sub, paths, cap) in results:
+            title = HAZ[hkey]["title"].title()
+            o1, e1 = send_documents(token, chat, paths, f"🎬 TikTok · {title} · {len(paths)} slides (1080×1920 PNG)")
+            o2, e2 = st.send_text(token, chat, cap[:4000])   # opis osobnym komunikatem - latwo skopiowac
+            print(f"{hkey}: slajdy {'wysłano' if o1 else 'BŁĄD ' + e1}, opis {'wysłano' if o2 else 'BŁĄD ' + e2}")
+            all_ok = all_ok and o1 and o2
+    return 0 if all_ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--swwf", default=st.SWWF_JSON)
@@ -661,17 +718,25 @@ def main():
     ap.add_argument("--min-level", type=int, default=int(os.environ.get("TT_MIN_LEVEL", "").strip() or "1"))
     ap.add_argument("--logo", default=os.environ.get("TT_LOGO", "").strip() or "swwf_logo.png")
     ap.add_argument("--guides", action="store_true", help="narysuj strefę bezpieczną (tylko podgląd)")
+    ap.add_argument("--send", action="store_true", help="wyślij zestawy na Telegram (TG_TOKEN + TIKTOK_CHAT_IDS)")
     args = ap.parse_args()
     with open(args.swwf, encoding="utf-8") as f:
         swwf = json.load(f)
     st.setup_fonts()
     geo_bg, named = load_geo()
     admin1 = st.load_admin1()
+    results = []
     for hkey in [k.strip() for k in args.hazards.split(",") if k.strip()]:
         if hkey not in HAZ or hkey not in swwf["days"][0]["hazards"]:
             print(f"Pomijam nieznany hazard: {hkey}")
             continue
-        make_set(swwf, hkey, geo_bg, named, admin1, args.out_dir, args.logo, args.min_level, args.guides)
+        r = make_set(swwf, hkey, geo_bg, named, admin1, args.out_dir, args.logo, args.min_level, args.guides)
+        if r:
+            results.append((hkey, r))
+    if args.send:
+        run = st.parse_iso(swwf["model_run"])
+        return send_results(results, f"🎬 TikTok: w prognozie z przebiegu {run:%d.%m %H:%M} nie ma zagrożeń "
+                                     f"na poziomie {swwf['level_names'][args.min_level]} lub wyższym — nie ma czego publikować.")
     return 0
 
 
