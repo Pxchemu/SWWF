@@ -1,0 +1,56 @@
+name: TikTok - slideshow SWWF (na zadanie, wysyla na Telegram)
+
+# Tylko recznie (Actions -> ten workflow -> Run workflow). Bierze najnowszy swwf.json z main, buduje zestawy slajdow
+# (1080x1920, angielski) dla wybranych hazardow i wysyla je na Telegram: slajdy jako pliki PNG (oryginalna jakosc)
+# + opis pod post jako osobna wiadomosc. Nic nie jest publikowane na TikToku - wrzucasz sam.
+on:
+  workflow_dispatch:
+    inputs:
+      hazards:
+        description: 'Hazardy po przecinku (general_winter_risk, snow_24h_cm, cold_min_t2m_c, snow_squalls, precip_24h_mm)'
+        required: false
+        default: 'general_winter_risk,snow_24h_cm,cold_min_t2m_c,precip_24h_mm'
+      min_level:
+        description: 'Minimalny poziom do zestawu: 1 = SLIGHT, 2 = ENHANCED, 3 = MODERATE ...'
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tiktok-swwf
+  cancel-in-progress: false
+
+jobs:
+  tiktok:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TIKTOK_CHAT_IDS: ${{ secrets.TIKTOK_CHAT_IDS }}   # opcjonalne; bez niego idzie do PIERWSZEGO numeru z TELEGRAM_CHAT_IDS
+      TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+    steps:
+      - name: Pobierz zawartosc repo (najnowszy main, ze swiezym swwf.json)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zainstaluj biblioteki
+        run: pip install matplotlib shapely requests
+
+      - name: Sprawdz czcionki i logo
+        run: |
+          ls fonts/IBMPlexSans-*.ttf || echo "UWAGA - brak fonts/IBMPlexSans-*.ttf, slajdy beda w domyslnej czcionce"
+          [ -f swwf_logo.png ] || echo "UWAGA - brak swwf_logo.png w glownym folderze, slajdy beda bez logo"
+
+      - name: Zbuduj slajdy i wyslij na Telegram
+        env:
+          TT_HAZARDS: ${{ inputs.hazards }}
+          TT_MIN_LEVEL: ${{ inputs.min_level }}
+        run: python swwf_tiktok.py --swwf swwf.json --out-dir tiktok_out --send
