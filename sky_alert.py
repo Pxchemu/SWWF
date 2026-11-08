@@ -105,6 +105,8 @@ def title_and_desc(content):
 # ----------------------------------------------------------------------------- mapa
 def render_alert_map(p, lat0, lon0, countries, admin1, path, theme):
     th = st.THEMES.get(theme, st.THEMES["dark"])
+    body, _ = st.setup_fonts()               # ta sama czcionka co w mapach SWWF (IBM Plex Sans z fonts/)
+    plt.rcParams["font.family"] = body
     xs = [x for x, _ in p["coords"]] + [lon0]
     ys = [y for _, y in p["coords"]] + [lat0]
     cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
