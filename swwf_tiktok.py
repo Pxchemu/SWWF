@@ -12,6 +12,8 @@ gornego paska TikToka (wyszukiwarka/status) i dolnego (opis, nazwa konta, muzyka
 Uzycie:
   python swwf_tiktok.py --swwf swwf.json --out-dir tiktok
   python swwf_tiktok.py --hazards snow_24h_cm,cold_min_t2m_c --guides   (--guides rysuje obrys strefy bezpiecznej - tylko do podgladu)
+Zestawy powstaja TYLKO z prognozy liczonej zespolem GEFS+IFS (pole "ensemble" w swwf.json); przy samym GEFS nic nie
+generujemy (przy --send przychodzi krotka wiadomosc). --any-ensemble wylacza te kontrole (tylko podglad/testy).
 Zmienne: TT_HAZARDS (domyslna lista), TT_MIN_LEVEL (domyslnie 1 = SLIGHT), TT_LOGO (domyslnie swwf_logo.png),
          TG_FONT_DIR (folder z IBMPlexSans-*.ttf, jak w skrypcie Telegrama).
 """
@@ -19,7 +21,6 @@ import argparse
 import json
 import math
 import os
-import textwrap
 import urllib.request
 from datetime import datetime
 
@@ -36,8 +37,8 @@ from shapely.geometry import Point, shape  # noqa: E402
 import swwf_telegram as st  # noqa: E402  (mapa, miasta, czcionki)
 
 W, H = 1080, 1920
-# strefa bezpieczna: gora ~190 px (pasek TikToka), dol od ~1440 px (opis, konto, muzyka), boki 90 px (ikony po prawej)
-SX0, SX1, SY0, SY1 = 90, 990, 190, 1440
+# strefa bezpieczna: gora ~190 px (pasek TikToka), dol do ~1600 px (kropki karuzeli ~1660, opis ~1720), boki 90 px
+SX0, SX1, SY0, SY1 = 90, 990, 190, 1600
 SW = SX1 - SX0
 PT = 0.72                       # px -> pt przy dpi=100
 
@@ -64,13 +65,17 @@ LEVELS_EN = ["NONE", "SLIGHT", "ENHANCED", "MODERATE", "HIGH", "EXTREME"]
 LEVEL_WORD = ["no hazard", "low", "elevated", "significant", "high", "extreme"]
 WD = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 WD_FULL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+WD_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 MON_FULL = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 # miasta na mapie (mniej niz w Telegramie - ekran telefonu jest maly)
 CITIES_TT = {"Warszawa", "Kraków", "Gdańsk", "Wrocław", "Poznań", "Szczecin", "Lublin", "Białystok", "Łódź",
              "Katowice", "Berlin", "Hamburg", "Kolonia", "Frankfurt", "Monachium", "Drezno", "Praga", "Brno",
-             "Bratysława", "Wiedeń", "Hanower", "Rzeszów"}
+             "Bratysława", "Olsztyn", "Hanower", "Rzeszów"}
+# przesuniecia podpisow (w stopniach) tylko dla map TikToka - tam podpisy sa wieksze niz w Telegramie, wiec ciasne pary
+# (Katowice/Krakow/Rzeszow, Olsztyn/Gdansk) trzeba rozsunac; brak wpisu = przesuniecie z swwf_telegram.CITIES
+TT_OFFSETS = {"Katowice": (-1.45, 0.12), "Kraków": (-0.05, -0.4), "Rzeszów": (0.1, -0.4), "Olsztyn": (0.14, 0.12)}
 
 COUNTRY_NAMES = {"DEU": "Germany", "POL": "Poland", "CZE": "Czechia", "SVK": "Slovakia"}
 
@@ -119,17 +124,18 @@ def fmt_amount(hkey: str, v: float) -> str:
 
 
 def models_text(swwf: dict) -> str:
-    info = (swwf.get("ensemble_info") or {}).get("models") or []
-    n = swwf.get("members_used") or sum(m.get("members", 0) for m in info) or 30
-    if info:
-        parts = [f"{m['members']} {m['provider'].split('/')[0]} {m['name']}" for m in info]
-        return f"{n} forecast runs ({' + '.join(parts)})"
-    return f"{n} forecast runs (NOAA GEFS)"
+    """Bez liczb (czlonkow, godzin) - nie tlumaczymy szczegolow wlasnego generowania prognozy."""
+    return "two leading global ensemble forecast systems (NOAA GEFS + ECMWF IFS)"
+
+
+def ensemble_ok(swwf: dict) -> bool:
+    """Slideshowy robimy tylko z zespolu GEFS+IFS."""
+    kind = swwf.get("ensemble") or ""
+    return "GEFS" in kind and "IFS" in kind
 
 
 def attribution(swwf: dict) -> str:
-    kind = swwf.get("ensemble") or "GEFS"
-    return "Contains modified ECMWF data (CC BY 4.0)" if "IFS" in kind else ""
+    return "Contains modified ECMWF data (CC BY 4.0)"
 
 
 # ----------------------------------------------------------------------------- tekst opisowy (EN)
@@ -262,14 +268,13 @@ def build_caption(swwf: dict, hkey: str, regions: Regions, days_used: list) -> s
     for i in days_used:
         lines.append("📅 " + day_sentence(swwf, swwf["days"][i], hkey, regions))
     lines += ["",
-              f"How it works: {models_text(swwf)} → chance × severity → 5 hazard levels (swipe to the last slide).",
+              f"How it works: we combine {models_text(swwf)} → chance × severity → 5 hazard levels (swipe to the last "
+              f"slide).",
               "",
               "⚠️ Not an official warning. This is our own model-based calculation and it can be wrong, "
               "especially for local snow amounts and at longer lead times. Always follow your national weather "
               "service (IMGW, DWD, ČHMÚ, SHMÚ)."]
-    a = attribution(swwf)
-    if a:
-        lines.append(a + ".")
+    lines.append(attribution(swwf) + ".")
     lines += ["", f"#weather #{hz['title'].lower().replace(' ', '')} #forecast #europe #poland #germany "
                   f"#czechia #slovakia #winter #meteorology"]
     return "\n".join(lines)
@@ -312,6 +317,39 @@ class Canvas:
         weight = {"bold": "semibold", "semibold": "medium", "medium": "normal"}.get(weight, weight)  # lżejszy krój
         return self.ax.text(x, y, s, fontsize=size * PT, color=color, fontweight=weight, ha=ha, va=va, **kw)
 
+    def width(self, s, size, weight="normal"):
+        """Szerokosc napisu w px (do centrowania, dopasowania i ukladania obok siebie bez nachodzenia)."""
+        weight = {"bold": "semibold", "semibold": "medium", "medium": "normal"}.get(weight, weight)
+        t = self.ax.text(0, 0, s, fontsize=size * PT, fontweight=weight, alpha=0)
+        w = t.get_window_extent(self.fig.canvas.get_renderer()).width
+        t.remove()
+        return w
+
+    def fit(self, s, size, maxw, weight="normal", minsize=18):
+        """Najwiekszy rozmiar <= size, przy ktorym napis miesci sie w maxw px."""
+        while size > minsize and self.width(s, size, weight) > maxw:
+            size -= 1
+        return size
+
+    def ctext(self, x, cy, s, size, color=TXT, weight="normal", ha="center", **kw):
+        """Tekst WIELKIMI/cyframi wysrodkowany optycznie w pionie wzgledem cy (kotwica = linia bazowa, bo va=center
+        liczy tez miejsce na ogonki liter i napis wyglada na uniesiony)."""
+        return self.text(x, cy + 0.35 * size, s, size, color, weight, ha=ha, va="baseline", **kw)
+
+    def wrap_px(self, s, size, maxw, weight="normal"):
+        """Zawijanie wg szerokosci w px (a nie liczby znakow) - krój ma zmienna szerokosc liter."""
+        lines, cur = [], ""
+        for w in s.split(" "):          # tylko zwykla spacja - twarde spacje (\u00a0) trzymaja zwroty razem
+            t = (cur + " " + w).strip()
+            if cur and self.width(t, size, weight) > maxw:
+                lines.append(cur)
+                cur = w
+            else:
+                cur = t
+        if cur:
+            lines.append(cur)
+        return lines
+
     def spaced(self, x, y, s, size, color, weight="normal", gap=0.0, **kw):
         """Tekst z rozstrzeleniem liter (gap w px) - jak podpis pod SWWF na stronie. Zwraca szerokość w px."""
         r = self.fig.canvas.get_renderer()
@@ -348,7 +386,7 @@ class Canvas:
         plt.close(self.fig)
 
 
-def header(cv: Canvas, swwf: dict, logo_path: str, right: str, days=None, cur=0):
+def header(cv: Canvas, swwf: dict, logo_path: str, right: str, days=None):
     y = SY0 + 46
     x = SX0
     if logo_path and os.path.exists(logo_path):
@@ -365,18 +403,25 @@ def header(cv: Canvas, swwf: dict, logo_path: str, right: str, days=None, cur=0)
     for k, col in enumerate(("#9fd3ff", "#2f80e0", "#8b5cf6")):      # trzy kreski pod napisem, jak na stronie
         cv.rrect(x + k * (bw + 8), SY0 + 69, bw, 6, 3, col)
     cv.spaced(x, SY0 + 91, "SEVERE WINTER WEATHER FORECAST", 19, SUB, "medium", gap=2.2)
-    if days:
-        pw, ph, gap = 104, 52, 10
-        px0 = SX1 - len(days) * pw - (len(days) - 1) * gap
-        for k, label in enumerate(days):
-            on = k == cur
-            xx = px0 + k * (pw + gap)
-            cv.rrect(xx, y - ph / 2 - 2, pw, ph, 27, TXT if on else CARD, ec=TXT if on else LINE, lw=2)
-            cv.text(xx + pw / 2, y - 2, label, 25, BG if on else SUB, "bold", ha="center")
+    pcy, ph = SY0 + 30, 44                   # mala pigulka w jednej linii z napisem SWWF, wyraznie nad podpisem
+    if days:                                  # znacznik wydania prognozy: "ISSUED 8 NOV 2026 · 08:00 CET"
+        lab, val = "ISSUED", days
+        sz, pad, gap = 18, 18, 9
+        w1, w2 = cv.width(lab, sz, "medium"), cv.width(val, sz, "bold")
+        pw = pad * 2 + w1 + gap + w2
+        if SX1 - pw < x + tw + 40:            # za wąsko obok napisu SWWF -> bez słowa ISSUED
+            lab, w1, gap = "", 0, 0
+            pw = pad * 2 + w2
+        cv.rrect(SX1 - pw, pcy - ph / 2, pw, ph, ph / 2, CARD, ec=LINE, lw=2)
+        x0 = SX1 - pw + pad
+        if lab:
+            cv.ctext(x0, pcy, lab, sz, FOOT, "medium", ha="left")
+        cv.ctext(x0 + w1 + gap, pcy, val, sz, TXT, "bold", ha="left")
     elif right:
-        pw = 20 + len(right) * 17
-        cv.rrect(SX1 - pw, y - 28, pw, 56, 28, CARD, ec=LINE, lw=2)
-        cv.text(SX1 - pw / 2, y, right, 27, TXT, "bold", ha="center")
+        sz, pad = 19, 22
+        pw = pad * 2 + cv.width(right, sz, "bold")
+        cv.rrect(SX1 - pw, pcy - ph / 2, pw, ph, ph / 2, CARD, ec=LINE, lw=2)
+        cv.ctext(SX1 - pw / 2, pcy, right, sz, TXT, "bold")
 
 
 def legend(cv: Canvas, swwf: dict, y: float, present: set):
@@ -387,7 +432,7 @@ def legend(cv: Canvas, swwf: dict, y: float, present: set):
         on = i in present
         face = CARD if i == 0 else colors[i]
         cv.rrect(x, y, seg, 16, 8, face, ec=LINE if i == 0 else "none", lw=2, alpha=1.0 if on or i == 0 else 0.55)
-        cv.text(x + 2, y + 44, LEVELS_EN[i], 23, TXT if on else FOOT, "bold" if on else "medium")
+        cv.ctext(x + seg / 2, y + 44, LEVELS_EN[i], 21, TXT if on else FOOT, "bold" if on else "medium")
 
 
 def draw_map_card(cv: Canvas, swwf: dict, day: dict, hkey: str, geo_bg, admin1, x, y, w):
@@ -395,7 +440,8 @@ def draw_map_card(cv: Canvas, swwf: dict, day: dict, hkey: str, geo_bg, admin1, 
     ASP = 1.0 / 0.62
     h = w * ((st.LAT_MAX - st.LAT_MIN) * ASP) / (st.LON_MAX - st.LON_MIN)
     ax = cv.fig.add_axes([x / W, 1 - (y + h) / H, w / W, h / H])
-    ax.set_facecolor("#12101a")
+    ax.set_facecolor("none")                      # tlo rysujemy jako zaokraglony ksztalt (patrz nizej), nie prostokat osi
+    ax.patch.set_alpha(0)
     ax.set_xlim(st.LON_MIN, st.LON_MAX)
     ax.set_ylim(st.LAT_MIN, st.LAT_MAX)
     ax.set_aspect(ASP, adjustable="box")
@@ -409,6 +455,7 @@ def draw_map_card(cv: Canvas, swwf: dict, day: dict, hkey: str, geo_bg, admin1, 
     clip = Path(st.rounded_rect_xy(st.LON_MIN, st.LAT_MIN, st.LON_MAX, st.LAT_MAX, rx, ry))
     cp = PathPatch(clip, transform=ax.transData, fc="none", ec="none")
     ax.add_patch(cp)
+    ax.add_patch(PathPatch(clip, transform=ax.transData, fc="#12101a", ec="none", zorder=0.5))
 
     def add(p, z):
         p.set_zorder(z)
@@ -436,113 +483,125 @@ def draw_map_card(cv: Canvas, swwf: dict, day: dict, hkey: str, geo_bg, admin1, 
     for name, lat, lon, dx, dy in st.CITIES:
         if name not in CITIES_TT:
             continue
+        if name in TT_OFFSETS:
+            dx, dy = TT_OFFSETS[name]
         ax.plot(lon, lat, "o", color=TXT, markersize=6.5, zorder=5, markeredgecolor="#0b0910", markeredgewidth=1.2,
                 clip_path=cp)
         t = ax.text(lon + dx * 1.15, lat + dy * 1.1, st.CITY_EN.get(name, name), fontsize=22 * PT, fontweight="semibold",
                     color=TXT, zorder=6, path_effects=halo)
         t.set_clip_path(cp)
-    ax.add_patch(PathPatch(clip, transform=ax.transData, fc="none", ec=LINE, lw=2.2 * PT, zorder=9))
+    ax.add_patch(PathPatch(clip, transform=ax.transData, fc="none", ec=LINE, lw=2.2 * PT, zorder=9, clip_on=False))
     return h
 
 
-def forecast_slide(swwf, day, di, hkey, geo_bg, admin1, logo, out, guides, ndays_total, day_labels):
+def issued_label(swwf: dict) -> str:
+    """Data i godzina wygenerowania prognozy (godzina zaokraglona w dol), np. '8 NOV 2026 · 08:00 CET'."""
+    dt = st.parse_iso(swwf.get("issued") or swwf["model_run"])
+    return f"{dt.day} {MON[dt.month - 1]} {dt.year} · {dt:%H}:00 {tz_label(dt)}"
+
+
+def forecast_slide(swwf, day, di, hkey, geo_bg, admin1, logo, out, guides):
     names, colors = swwf["level_names"], swwf["level_colors"]
     hz = HAZ[hkey]
     f_lg = np.nan_to_num(np.array(day["hazards"][hkey]["level_grid"], dtype=float), nan=0).astype(int)
     top = int(f_lg.max())
     present = {int(v) for v in np.unique(f_lg) if v > 0}
     cv = Canvas(colors[top] if top > 0 else "#3b6fe0", guides)
-    header(cv, swwf, logo, "", days=day_labels, cur=di)
+    header(cv, swwf, logo, "", days=issued_label(swwf))
 
     # tytul hazardu
-    cv.text(SX0, 358, hz["title"], 118 if len(hz["title"]) <= 8 else 92, TXT, "bold")
-    cv.text(SX0, 442, hz["sub"], 32, SUB, "medium")
+    cv.text(SX0, 414, hz["title"], 108 if len(hz["title"]) <= 8 else 84, TXT, "bold")
+    cv.text(SX0, 506, hz["sub"], 32, SUB, "medium")
 
-    # data (najwazniejszy element) + szczyt
+    # data waznosci (najwazniejszy element, ale spokojniejszy rozmiar) + szczyt - obie grupy wysrodkowane w pionie
     dt0, dt1 = st.parse_iso(day["valid_from"]), st.parse_iso(day["valid_to"])
-    by, bh = 480, 168
+    by, bh = 556, 156
+    mid = by + bh / 2
     cv.rrect(SX0, by, SW, bh, 30, CARD, ec=LINE, lw=2)
     cv.rrect(SX0, by, 14, bh, 7, colors[top] if top > 0 else SUB)
-    cv.text(SX0 + 46, by + 60, f"{WD[dt0.weekday()]} {dt0.day} {MON[dt0.month - 1]}", 92, TXT, "bold")
-    cv.text(SX0 + 46, by + 126,
-            f"{dt0:%H:%M} {WD_FULL[dt0.weekday()]} → {dt1:%H:%M} {WD_FULL[dt1.weekday()]} · {tz_label(dt0)}",
-            27, SUB, "medium")
-    cx = SX1 - 34
-    cv.text(cx, by + 58, "PEAK LEVEL", 25, SUB, "semibold", ha="right")
     nm = names[top] if top > 0 else "NONE"
-    cv.text(cx, by + 112, nm, 56 if len(nm) <= 7 else 48, colors[top] if top > 0 else SUB, "bold", ha="right")
+    nsz = 52 if len(nm) <= 7 else 44
+    rx = SX1 - 42
+    peak_w = max(cv.width("PEAK LEVEL", 23, "semibold"), cv.width(nm, nsz, "bold"))
+    lx = SX0 + 14 + 36
+    date_s = f"{WD_LONG[dt0.weekday()]} {dt0.day} {MON[dt0.month - 1]}"
+    dsz = cv.fit(date_s, 62, (rx - peak_w) - lx - 36, "bold", minsize=40)
+    cv.ctext(lx, mid - 21, date_s, dsz, TXT, "bold", ha="left")
+    cv.ctext(lx, mid + 30,
+             f"{dt0:%H:%M} {WD_FULL[dt0.weekday()]} → {dt1:%H:%M} {WD_FULL[dt1.weekday()]} · {tz_label(dt0)}",
+             25, SUB, "medium", ha="left")
+    cv.ctext(rx, mid - 28, "PEAK LEVEL", 23, SUB, "semibold", ha="right")
+    cv.ctext(rx, mid + 20, nm, nsz, colors[top] if top > 0 else SUB, "bold", ha="right")
 
     # mapa
-    my = by + bh + 26
+    my = by + bh + 30
     mh = draw_map_card(cv, swwf, day, hkey, geo_bg, admin1, SX0, my, SW)
-    ly = my + mh + 24
+    ly = my + mh + 34
     legend(cv, swwf, ly, present or {0})
 
-    # stopka (disclaimer) - nadal w strefie bezpiecznej
-    fy = ly + 82
-    cv.text(SX0, fy, "Own model analysis — not an official warning", 27, TXT, "semibold")
-    cv.text(SX1, fy, "MeteoPanel", 27, SUB, "bold", ha="right")
+    # stopka (disclaimer) - mala, nadal w strefie bezpiecznej
+    fy = ly + 92
+    footer(cv, fy)
     cv.finish(out)
     return fy
 
 
-def wrap(s, width):
-    return textwrap.wrap(s, width=width, break_long_words=False)
+def footer(cv, fy):
+    cv.ctext(SX0, fy, "Own model analysis — not an official warning", 21, FOOT, "medium", ha="left")
+    cv.ctext(SX1, fy, "MeteoPanel", 21, SUB, "bold", ha="right")
 
 
 def explain_steps(swwf, hkey):
-    models = models_text(swwf)
+    """Z czego korzystamy - bez liczb (czlonkow, godzin, rozdzielczosci), zeby nie tlumaczyc szczegolow generowania."""
     if hkey == "snow_squalls":
-        models = "30 forecast runs (30 NOAA GEFS)"
-    n = models.split(" forecast")[0]
-    who = models.split("(")[-1].rstrip(")")
-    s1 = ("Many forecasts of the same day", f"{n} runs from slightly different starting points: {who}. "
-          f"Their spread = uncertainty.")
-    s3 = ("Chance × severity = level", "Share of runs reaching each threshold → matrix → level. "
+        s1 = ("Many forecasts of the same day", "We use NOAA's GEFS ensemble: many runs from slightly different "
+              "starting points. How much they disagree = uncertainty.")
+    else:
+        s1 = ("Many forecasts of the same day", "We combine two leading global ensemble forecast systems, NOAA GEFS "
+              "and ECMWF IFS. How much their runs disagree = uncertainty.")
+    s3 = ("Chance × severity = level", "Share of runs reaching each threshold\u00a0→\u00a0matrix\u00a0→\u00a0level. "
           "A small chance of a big event can still rank high.")
     if hkey == "snow_24h_cm":
-        s2 = ("Fresh snow in every ~25 km cell", "Precipitation × share falling as snow (from air temperature) × "
-              "snow density (colder = fluffier).")
+        s2 = ("Fresh snow in every grid cell", "We estimate snowfall from forecast precipitation and air temperature.")
     elif hkey == "cold_min_t2m_c":
-        s2 = ("Coldest air of the day", "Air temperature every 3 hours in each run; we keep the lowest reading "
-              "of the 24 h window in every ~25 km cell.")
+        s2 = ("Coldest air of the day", "We keep the lowest forecast air temperature of the 24-hour window in every "
+              "grid cell.")
     elif hkey == "precip_24h_mm":
-        s2 = ("24-hour precipitation total", "Each run gives precipitation in 6-hour steps; we add them up to "
-              "millimetres of water for the day.")
+        s2 = ("24-hour precipitation total", "We add up forecast precipitation to millimetres of water for the day.")
     elif hkey == "snow_squalls":
-        s2 = ("Squall ingredients", "Unstable air (CAPE), mostly frozen precipitation and real precipitation at "
-              "the same time. Peak CAPE sets the intensity.")
+        s2 = ("Squall ingredients", "Unstable air, mostly frozen precipitation and real precipitation at the same "
+              "time. The instability sets the intensity.")
     else:
-        s1 = ("Three hazards, three levels", "Snow, cold and snow squalls are each rated with the chance × severity "
-              "matrix, using the whole forecast ensemble.")
+        s1 = ("Three hazards, three levels", "Snow, cold and snow squalls are each rated with the chance\u00a0×\u00a0severity "
+              "matrix.")
         s2 = ("Take the worst", "In every cell, the general winter risk is the highest of those three levels.")
         s3 = ("Bump when they stack", "If two or more hazards reach ENHANCED or above in the same cell, the "
               "general level goes up by one step.")
     return [s1, s2, s3]
 
 
-def how_slide(swwf, hkey, logo, out, guides, day_labels):
+def how_slide(swwf, hkey, logo, out, guides):
     names, colors = swwf["level_names"], swwf["level_colors"]
     hz = HAZ[hkey]
     info = swwf["hazard_info"].get(hkey)
     cv = Canvas("#7c4dff", guides)
     header(cv, swwf, logo, "HOW IT WORKS")
 
-    cv.text(SX0, 324, "HOW WE CALCULATE", 30, SUB, "semibold")
-    cv.text(SX0, 384, hz["title"] if hkey != "general_winter_risk" else "WINTER RISK", 78 if len(hz["title"]) <= 8 else 66,
+    cv.text(SX0, 372, "HOW WE CALCULATE", 30, SUB, "semibold")
+    cv.text(SX0, 452, hz["title"] if hkey != "general_winter_risk" else "WINTER RISK", 74 if len(hz["title"]) <= 8 else 60,
             TXT, "bold")
 
     # kroki
-    y = 450
+    y = 520
     steps = explain_steps(swwf, hkey)
     for i, (title, desc) in enumerate(steps, 1):
         cv.dot(SX0 + 27, y + 25, 27, TXT, z=9)
         cv.text(SX0 + 27, y + 26, str(i), 30, BG, "bold", ha="center")
         cv.text(SX0 + 78, y + 24, title, 34, TXT, "bold")
-        lines = wrap(desc, 56)
+        lines = cv.wrap_px(desc, 27, SW - 78 - 6)
         for k, ln in enumerate(lines):
             cv.text(SX0 + 78, y + 64 + k * 32, ln, 27, SUB, "normal")
-        y += 64 + 32 * len(lines) + 14
+        y += 64 + 32 * len(lines) + 20
 
     # macierz / lancuch
     matrix = swwf.get("swwf_matrix")
@@ -569,7 +628,7 @@ def how_slide(swwf, hkey, logo, out, guides, day_labels):
         lab_w = 190
         gx0 = SX0 + lab_w
         cw = (SX1 - gx0 - 5 * 6) / 6
-        rh = 44
+        rh = 46
         for j, b in enumerate(bins):
             cv.text(gx0 + j * (cw + 6) + cw / 2, y + 16, fmt_b(b), 25, SUB, "bold", ha="center")
         gy = y + 40
@@ -590,11 +649,18 @@ def how_slide(swwf, hkey, logo, out, guides, day_labels):
         ex_x, ex_y = gx0 + j * (cw + 6), gy + rr * (rh + 6)
         cv.ax.add_patch(FancyBboxPatch((ex_x - 3, ex_y - 3), cw + 6, rh + 6, boxstyle="round,pad=0,rounding_size=12",
                                        fc="none", ec=TXT, lw=4.2 * PT, zorder=12))
-        ey = gy + 6 * (rh + 6) + 18
-        cv.text(SX0, ey, "Example:", 29, TXT, "bold")
-        cv.text(SX0 + 140, ey,
-                f"{rows[pi]} of runs reach {fmt_b(bins[j])} → ", 29, SUB, "medium")
-        cv.text(SX1, ey, names[lv], 31, colors[lv], "bold", ha="right")
+        ey = gy + 6 * (rh + 6) + 26
+        lead = "Example:"
+        rest = f"{rows[pi]} of runs reach {fmt_b(bins[j])} →"
+        lvl_s = names[lv]
+        esz = 29
+        while esz > 22 and (cv.width(lead, esz, "bold") + 14 + cv.width(rest, esz, "medium") + 18
+                            + cv.width(lvl_s, esz + 2, "bold")) > SW:
+            esz -= 1
+        lw = cv.width(lead, esz, "bold")
+        cv.ctext(SX0, ey, lead, esz, TXT, "bold", ha="left")
+        cv.ctext(SX0 + lw + 14, ey, rest, esz, SUB, "medium", ha="left")
+        cv.ctext(SX1, ey, lvl_s, esz + 2, colors[lv], "bold", ha="right")
         end_y = ey
     else:
         # hazard bez macierzy (ogolne ryzyko): trzy karty "SNOW + COLD + SQUALLS -> MAX"
@@ -610,11 +676,10 @@ def how_slide(swwf, hkey, logo, out, guides, day_labels):
         end_y = y + 160
 
     # legenda poziomow + disclaimer
-    ly = min(end_y + 50, SY1 - 104)
+    ly = min(end_y + 56, SY1 - 104)
     legend(cv, swwf, ly, set(range(6)))
-    fy = ly + 90
-    cv.text(SX0, fy, "Own model analysis — not an official warning", 27, TXT, "semibold")
-    cv.text(SX1, fy, "MeteoPanel", 27, SUB, "bold", ha="right")
+    fy = ly + 92
+    footer(cv, fy)
     cv.finish(out)
     return fy
 
@@ -622,7 +687,6 @@ def how_slide(swwf, hkey, logo, out, guides, day_labels):
 def make_set(swwf, hkey, geo_bg, named, admin1, out_dir, logo, min_level, guides=False):
     names = swwf["level_names"]
     regions = Regions(swwf, named)
-    day_labels = [f"DAY {i + 1}" for i in range(len(swwf["days"]))]
     used = []
     for i, day in enumerate(swwf["days"]):
         h = day["hazards"].get(hkey)
@@ -639,11 +703,11 @@ def make_set(swwf, hkey, geo_bg, named, admin1, out_dir, logo, min_level, guides
     for i in used:
         n += 1
         p = os.path.join(sub, f"slide_{n}_day{i + 1}.png")
-        forecast_slide(swwf, swwf["days"][i], i, hkey, geo_bg, admin1, logo, p, guides, len(swwf["days"]), day_labels)
+        forecast_slide(swwf, swwf["days"][i], i, hkey, geo_bg, admin1, logo, p, guides)
         paths.append(p)
     n += 1
     p = os.path.join(sub, f"slide_{n}_how.png")
-    how_slide(swwf, hkey, logo, p, guides, day_labels)
+    how_slide(swwf, hkey, logo, p, guides)
     paths.append(p)
     cap = build_caption(swwf, hkey, regions, used)
     with open(os.path.join(sub, "caption.txt"), "w", encoding="utf-8") as f:
@@ -718,10 +782,19 @@ def main():
     ap.add_argument("--min-level", type=int, default=int(os.environ.get("TT_MIN_LEVEL", "").strip() or "1"))
     ap.add_argument("--logo", default=os.environ.get("TT_LOGO", "").strip() or "swwf_logo.png")
     ap.add_argument("--guides", action="store_true", help="narysuj strefę bezpieczną (tylko podgląd)")
+    ap.add_argument("--any-ensemble", action="store_true",
+                    help="nie wymagaj zespolu GEFS+IFS (tylko podglad/testy)")
     ap.add_argument("--send", action="store_true", help="wyślij zestawy na Telegram (TG_TOKEN + TIKTOK_CHAT_IDS)")
     args = ap.parse_args()
     with open(args.swwf, encoding="utf-8") as f:
         swwf = json.load(f)
+    if not args.any_ensemble and not ensemble_ok(swwf):
+        kind = swwf.get("ensemble") or "brak informacji"
+        run = st.parse_iso(swwf["model_run"])
+        msg = (f"🎬 TikTok: prognoza z przebiegu {run:%d.%m %H:%M} nie jest liczona zespołem GEFS+IFS (skład: {kind}) "
+               f"— slajdów nie generuję.")
+        print(msg)
+        return send_results([], msg) if args.send else 0
     st.setup_fonts()
     geo_bg, named = load_geo()
     admin1 = st.load_admin1()
