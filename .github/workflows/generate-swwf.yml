@@ -28,7 +28,7 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 345   # czekanie na GEFS (do 90 min) i na IFS (do ~5 h od przebiegu przy starcie wcześnie po GEFS)
     steps:
       - name: Pobierz zawartosc repo
         uses: actions/checkout@v4
@@ -49,7 +49,10 @@ jobs:
           # drugi model zespolu: IFS ENS (ECMWF). off = tylko GEFS (jak dotad), on = GEFS + IFS z fallbackiem na
           # sam GEFS. Przelacznik: zmienna repozytorium SWWF_IFS (Settings > Secrets and variables > Actions > Variables)
           SWWF_IFS: ${{ inputs.ifs || vars.SWWF_IFS || 'off' }}
-          SWWF_IFS_WAIT_MINUTES: "120"  # ile czekac na kompletny przebieg IFS (liczone od startu; potem awaryjnie sam GEFS)
+          SWWF_IFS_WAIT_MINUTES: "120"  # minimum czekania na IFS od startu zadania (potem awaryjnie sam GEFS)
+          SWWF_IFS_PUBLISH_HOURS: "9"   # ...a przy wczesnym starcie czekamy do (godzina przebiegu + 9 h): ECMWF publikuje ok. +7 h 40 min
+          SWWF_IFS_MAX_WAIT_MINUTES: "300"   # twardy limit czekania na IFS
+          IFS_INDEX_RETRY_MINUTES: "15"      # ile ponawiac brakujacy/zawodny indeks kroku, zanim IFS zostanie pominiety
           IFS_WORKERS: "8"
           PYTHONUNBUFFERED: "1"   # log na zywo (bez tego wypisuje sie dopiero po zakonczeniu)
         run: python generate_swwf.py
