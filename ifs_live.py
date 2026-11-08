@@ -36,6 +36,7 @@ LAST_STEP = STEPS_T[-1]
 WORKERS = int(os.environ.get("IFS_WORKERS", "8"))
 MIN_COMPLETE_MEMBERS = int(os.environ.get("IFS_MIN_MEMBERS", "25"))    # poniżej — IFS nie jest używany
 RETRY_ROUNDS = 3
+INDEX_RETRY_MINUTES = int(os.environ.get("IFS_INDEX_RETRY_MINUTES", "15"))   # tyle ponawiamy brakujący indeks kroku
 
 
 def wait_for_base(run, wait_minutes, log=print):
@@ -64,10 +65,10 @@ def wait_for_base(run, wait_minutes, log=print):
         time.sleep(120)
 
 
-def read_index(base, run, step):
+def read_index(base, run, step, attempts=8):
     """[(param, członek, offset, długość)] dla kroku; członek 0 = kontrolny (type cf). None gdy brak indeksu."""
     import json
-    st, raw = A.http_get(A.index_url(base, run, step), attempts=8)
+    st, raw = A.http_get(A.index_url(base, run, step), attempts=attempts)
     if raw is None:
         return None
     want = {"2t"} | ({"tp"} if step in STEPS_TP else set())
@@ -87,6 +88,37 @@ def read_index(base, run, step):
             continue
         out.append((d["param"], member, int(d["_offset"]), int(d["_length"])))
     return out
+
+
+def read_index_robust(base, run, step, log, retry_minutes=INDEX_RETRY_MINUTES):
+    """Indeks kroku z ponawianiem: po kolei wszystkie źródła (najpierw to, na którym wykryto przebieg), potem runda od nowa
+    z rosnącą przerwą, do retry_minutes. Pojedynczy kłopotliwy indeks (chwilowe 503/404 na jednym z ~26 plików) nie
+    może skreślać całego IFS. Zwraca (lista, źródło które ją dało) albo (None, None) po wyczerpaniu czasu.
+    Dane tego kroku trzeba potem pobierać z TEGO SAMEGO źródła: repliki (AWS/Google/portal ECMWF) są uzupełniane
+    w różnym tempie, więc plik, którego indeks jest na jednym źródle, może jeszcze nie istnieć na innym."""
+    order = [base] + [b for b in A.BASES if b != base]
+    deadline = time.time() + retry_minutes * 60
+    last, rnd = "?", 0
+    while True:
+        for b in order:
+            try:
+                idx = read_index(b, run, step, attempts=4)
+            except Exception as e:
+                last = f"{b.split('/')[2]}: {type(e).__name__}: {str(e)[-120:]}"
+                continue
+            if idx is not None:
+                if rnd:
+                    log(f"IFS: indeks kroku {step} h udało się pobrać po {rnd} ponownych rundach "
+                        f"(źródło: {b.split('/')[2]})")
+                return idx, b
+            last = f"{b.split('/')[2]}: brak pliku (404)"
+        rnd += 1
+        if time.time() >= deadline:
+            log(f"IFS: indeks kroku {step} h niedostępny na żadnym źródle po {retry_minutes} min — ostatni błąd: {last}")
+            return None, None
+        if rnd == 1:
+            log(f"IFS: indeks kroku {step} h chwilowo niedostępny ({last}) — ponawiam")
+        time.sleep(min(15 * rnd, 60))
 
 
 def decode_region(raw, region):
@@ -168,17 +200,18 @@ def load_ifs(run, region, wait_minutes=45, log=print):
     log(f"IFS: przebieg dostępny po {t_avail:.0f} s — pobieram i dekoduję")
 
     steps = sorted(set(STEPS_T) | set(STEPS_TP))
-    index = {}
+    index, src = {}, {}                               # src: krok -> źródło, z którego pobieramy dane tego kroku
     with ThreadPoolExecutor(max_workers=min(WORKERS, 8)) as ex:
-        futs = {ex.submit(read_index, base, run, s): s for s in steps}
+        futs = {ex.submit(read_index_robust, base, run, s, log): s for s in steps}
         for f in as_completed(futs):
             try:
-                index[futs[f]] = f.result()
+                index[futs[f]], src[futs[f]] = f.result()
             except Exception as e:
                 index[futs[f]] = None
-                log(f"IFS: indeks kroku {futs[f]} h: {str(e)[-100:]}")
-    if any(index.get(s) is None for s in steps):
-        log("IFS: brak indeksu dla części kroków — pomijam IFS.")
+                log(f"IFS: indeks kroku {futs[f]} h: {type(e).__name__}: {str(e)[-150:]}")
+    missing = [s for s in steps if index.get(s) is None]
+    if missing:
+        log(f"IFS: brak indeksu dla kroków {missing} — pomijam IFS.")
         return None
 
     todo = [(p, m, s, off, ln) for s in steps for (p, m, off, ln) in index[s]]
@@ -191,7 +224,7 @@ def load_ifs(run, region, wait_minutes=45, log=print):
         failed = []
         done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futs = {ex.submit(fetch_field, base, run, s, off, ln, region): (p, m, s, off, ln)
+            futs = {ex.submit(fetch_field, src[s], run, s, off, ln, region): (p, m, s, off, ln)
                     for (p, m, s, off, ln) in items}
             for f in as_completed(futs):
                 p, m, s, off, ln = futs[f]
@@ -230,6 +263,9 @@ def load_ifs(run, region, wait_minutes=45, log=print):
         log(f"IFS: runda {rnd + 1}: {len(pending)} z {total} wiadomości nieudanych"
             f"{' — ponawiam' if rnd < RETRY_ROUNDS else ''}")
         if rnd < RETRY_ROUNDS:
+            for s in {it[2] for it in pending}:          # kolejna runda: te kroki z następnego źródła
+                order = list(A.BASES)
+                src[s] = order[(order.index(src[s]) + 1) % len(order)] if src[s] in order else order[0]
             time.sleep(15)
 
     members = {}
@@ -240,7 +276,7 @@ def load_ifs(run, region, wait_minutes=45, log=print):
         if len(t) == len(STEPS_T) and len(tp) == len(STEPS_TP):
             members[m] = {"t": {s: (a - 273.15).astype(np.float32) for s, a in t.items()},
                           "tp": {s: (a * 1000.0).astype(np.float32) for s, a in tp.items()}}
-    stats = {"base": base.split("/")[2], "run": run.strftime("%Y-%m-%d %H"),
+    stats = {"base": "+".join(sorted({b.split("/")[2] for b in src.values() if b})), "run": run.strftime("%Y-%m-%d %H"),
              "messages_total": total, "messages_failed": len(pending),
              "members_total": len(all_members), "members_complete": len(members), "has_control": 0 in all_members,
              "seconds_wait": round(t_avail, 1), "seconds_total": round(time.time() - t0, 1),
