@@ -37,8 +37,9 @@ from shapely.geometry import Point, shape  # noqa: E402
 import swwf_telegram as st  # noqa: E402  (mapa, miasta, czcionki)
 
 W, H = 1080, 1920
-# strefa bezpieczna: gora ~190 px (pasek TikToka), dol do ~1600 px (kropki karuzeli ~1660, opis ~1720), boki 90 px
-SX0, SX1, SY0, SY1 = 90, 990, 190, 1600
+# strefa bezpieczna (widok feedu z opisem): gora ~190 px, dol do ~1500 px (kropki karuzeli ~1540, opis od ~1600),
+# prawo do 930 px (kolumna ikon TikToka: serce, komentarze, zakladka, udostepnij zaczyna sie ~950 px), lewo 80 px
+SX0, SX1, SY0, SY1 = 80, 930, 190, 1500
 SW = SX1 - SX0
 PT = 0.72                       # px -> pt przy dpi=100
 
@@ -510,12 +511,12 @@ def forecast_slide(swwf, day, di, hkey, geo_bg, admin1, logo, out, guides):
     header(cv, swwf, logo, "", days=issued_label(swwf))
 
     # tytul hazardu
-    cv.text(SX0, 414, hz["title"], 108 if len(hz["title"]) <= 8 else 84, TXT, "bold")
-    cv.text(SX0, 506, hz["sub"], 32, SUB, "medium")
+    cv.text(SX0, 412, hz["title"], 108 if len(hz["title"]) <= 8 else 84, TXT, "bold")
+    cv.text(SX0, 502, hz["sub"], 32, SUB, "medium")
 
     # data waznosci (najwazniejszy element, ale spokojniejszy rozmiar) + szczyt - obie grupy wysrodkowane w pionie
     dt0, dt1 = st.parse_iso(day["valid_from"]), st.parse_iso(day["valid_to"])
-    by, bh = 556, 156
+    by, bh = 548, 152
     mid = by + bh / 2
     cv.rrect(SX0, by, SW, bh, 30, CARD, ec=LINE, lw=2)
     cv.rrect(SX0, by, 14, bh, 7, colors[top] if top > 0 else SUB)
@@ -534,9 +535,9 @@ def forecast_slide(swwf, day, di, hkey, geo_bg, admin1, logo, out, guides):
     cv.ctext(rx, mid + 20, nm, nsz, colors[top] if top > 0 else SUB, "bold", ha="right")
 
     # mapa
-    my = by + bh + 30
+    my = by + bh + 28
     mh = draw_map_card(cv, swwf, day, hkey, geo_bg, admin1, SX0, my, SW)
-    ly = my + mh + 34
+    ly = my + mh + 30
     legend(cv, swwf, ly, present or {0})
 
     # stopka (disclaimer) - mala, nadal w strefie bezpiecznej
@@ -587,12 +588,12 @@ def how_slide(swwf, hkey, logo, out, guides):
     cv = Canvas("#7c4dff", guides)
     header(cv, swwf, logo, "HOW IT WORKS")
 
-    cv.text(SX0, 372, "HOW WE CALCULATE", 30, SUB, "semibold")
-    cv.text(SX0, 452, hz["title"] if hkey != "general_winter_risk" else "WINTER RISK", 74 if len(hz["title"]) <= 8 else 60,
+    cv.text(SX0, 356, "HOW WE CALCULATE", 30, SUB, "semibold")
+    cv.text(SX0, 436, hz["title"] if hkey != "general_winter_risk" else "WINTER RISK", 74 if len(hz["title"]) <= 8 else 60,
             TXT, "bold")
 
     # kroki
-    y = 520
+    y = 496
     steps = explain_steps(swwf, hkey)
     for i, (title, desc) in enumerate(steps, 1):
         cv.dot(SX0 + 27, y + 25, 27, TXT, z=9)
@@ -601,7 +602,7 @@ def how_slide(swwf, hkey, logo, out, guides):
         lines = cv.wrap_px(desc, 27, SW - 78 - 6)
         for k, ln in enumerate(lines):
             cv.text(SX0 + 78, y + 64 + k * 32, ln, 27, SUB, "normal")
-        y += 64 + 32 * len(lines) + 20
+        y += 64 + 32 * len(lines) + 14
 
     # macierz / lancuch
     matrix = swwf.get("swwf_matrix")
@@ -628,7 +629,7 @@ def how_slide(swwf, hkey, logo, out, guides):
         lab_w = 190
         gx0 = SX0 + lab_w
         cw = (SX1 - gx0 - 5 * 6) / 6
-        rh = 46
+        rh = 38
         for j, b in enumerate(bins):
             cv.text(gx0 + j * (cw + 6) + cw / 2, y + 16, fmt_b(b), 25, SUB, "bold", ha="center")
         gy = y + 40
