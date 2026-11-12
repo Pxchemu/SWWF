@@ -850,6 +850,12 @@ class Regions:
                     if minx - 0.01 <= lo <= maxx + 0.01 and gp.contains(Point(lo, la)):
                         m[i, j] = True
             self.cells[iso] = m
+        # obszar omawiany: tylko DE/PL/CZ/SK (reszta siatki - np. Austria, Wegry, Ukraina, morze - nie liczy sie do szczytu)
+        self.study = np.zeros((len(lat), len(lon)), dtype=bool)
+        for m in self.cells.values():
+            self.study |= m
+        if not self.study.any():
+            self.study[:] = True
 
     def describe(self, mask: np.ndarray) -> str:
         """np. 'most of Poland, the southern part of Czechia and isolated areas of Germany and Slovakia'."""
@@ -904,6 +910,8 @@ def day_facts(swwf: dict, day: dict, hkey: str, regions: Regions) -> dict:
     h = day["hazards"][hkey]
     lg = np.array(h["level_grid"], dtype=float)
     lg = np.nan_to_num(lg, nan=0).astype(int)
+    if regions.study.shape == lg.shape:
+        lg = np.where(regions.study, lg, 0)   # szczyt/udzial tylko z omawianych krajow
     top = int(lg.max()) if lg.size else 0
     mi = np.array(h.get("median_intensity") or [], dtype=float)
     peak = None
@@ -1192,10 +1200,12 @@ def issued_label(swwf: dict) -> str:
     return f"{dt.day} {MON[dt.month - 1]} {dt.year} · {dt:%H}:00 {tz_label(dt)}"
 
 
-def forecast_slide(swwf, day, di, hkey, geo_bg, admin1, logo, out, guides):
+def forecast_slide(swwf, day, di, hkey, geo_bg, admin1, logo, out, guides, regions):
     names, colors = swwf["level_names"], swwf["level_colors"]
     hz = HAZ[hkey]
     f_lg = np.nan_to_num(np.array(day["hazards"][hkey]["level_grid"], dtype=float), nan=0).astype(int)
+    if regions.study.shape == f_lg.shape:
+        f_lg = np.where(regions.study, f_lg, 0)   # poziom szczytowy i legenda tylko z DE/PL/CZ/SK
     top = int(f_lg.max())
     present = {int(v) for v in np.unique(f_lg) if v > 0}
     cv = Canvas(colors[top] if top > 0 else "#3b6fe0", guides)
@@ -1382,7 +1392,7 @@ def make_set(swwf, hkey, geo_bg, named, admin1, out_dir, logo, min_level, guides
     used = []
     for i, day in enumerate(swwf["days"]):
         h = day["hazards"].get(hkey)
-        if h and st.max_level(h, names) >= min_level:
+        if h and day_facts(swwf, day, hkey, regions)["top"] >= min_level:
             used.append(i)
     if not used:
         print(f"{hkey}: brak zagrożenia >= {names[min_level]} w żadnej dobie — pomijam zestaw.")
@@ -1395,7 +1405,7 @@ def make_set(swwf, hkey, geo_bg, named, admin1, out_dir, logo, min_level, guides
     for i in used:
         n += 1
         p = os.path.join(sub, f"slide_{n}_day{i + 1}.png")
-        forecast_slide(swwf, swwf["days"][i], i, hkey, geo_bg, admin1, logo, p, guides)
+        forecast_slide(swwf, swwf["days"][i], i, hkey, geo_bg, admin1, logo, p, guides, regions)
         paths.append(p)
     n += 1
     p = os.path.join(sub, f"slide_{n}_how.png")
